@@ -1,0 +1,71 @@
+topics:
+  input: /emotion_bot/input
+  state: /emotion_bot/state
+  response: /emotion_bot/response
+  expression_cmd: /emotion_bot/expression_cmd
+  safe_cmd: /emotion_bot/safe_cmd
+  manual_joy: /emotion_bot/manual_joy
+  joy_output: /emotion_bot/joy_out
+  status: /emotion_bot/status
+  sim_ready: /emotion_bot/sim_controller_ready
+
+services:
+  set_motion_enabled: /emotion_bot/set_motion_enabled
+
+runtime:
+  emotion_bot_path: /workspaces/emotion-bot
+  backend: deterministic
+  personality: balanced
+  seed: 7
+  randomness_enabled: false
+  heartbeat_rate: 2.0
+
+mapper:
+  publish_rate: 20.0
+  state_timeout: 1.0
+
+safety:
+  motion_enabled: false
+  require_sim_ready: false
+  publish_rate: 20.0
+  expression_timeout: 0.50
+  manual_timeout: 0.50
+  manual_priority_hold: 0.75
+  mode_transition_delay: 1.50
+  limits:
+    linear_x: 0.10
+    linear_y: 0.05
+    angular_z: 0.10
+
+mappings:
+  neutral:
+    segments:
+      - {duration: 0.5, x: 0.0, y: 0.0, yaw: 0.0}
+  joy:
+    segments:
+      - {duration: 3.0, x: 0.06, y: 0.0, yaw: 0.0}
+      - {duration: 1.0, x: 0.0, y: 0.0, yaw: 0.04}
+  sadness:
+    segments:
+      - {duration: 2.0, x: -0.025, y: 0.0, yaw: 0.0}
+  anger:
+    segments:
+      - {duration: 1.2, x: 0.04, y: 0.0, yaw: 0.08}
+      - {duration: 1.2, x: 0.04, y: 0.0, yaw: -0.08}
+  fear:
+    segments:
+      - {duration: 1.8, x: -0.04, y: 0.0, yaw: 0.05}
+  surprise:
+    segments:
+      - {duration: 1.0, x: 0.0, y: 0.04, yaw: 0.0}
+      - {duration: 1.0, x: 0.0, y: -0.04, yaw: 0.0}
+  disgust:
+    segments:
+      - {duration: 2.0, x: 0.0, y: -0.03, yaw: -0.04}
+  curiosity:
+    segments:
+      - {duration: 1.5, x: 0.02, y: 0.0, yaw: 0.04}
+      - {duration: 1.5, x: 0.02, y: 0.0, yaw: -0.04}
+  affection:
+    segments:
+      - {duration: 2.5, x: 0.03, y: 0.02, yaw: 0.025}

@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>emotion_bot_ros</name>
+  <version>0.1.0</version>
+  <description>Safe, simulation-only ROS integration for EmotionBot and Lite3.</description>
+  <maintainer email="dimitarbez@example.com">Dimitar Bezhanov</maintainer>
+  <license>GPL-3.0-only</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>controller_manager_msgs</depend>
+  <depend>gazebo_msgs</depend>
+  <depend>gazebo_ros</depend>
+  <depend>geometry_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <exec_depend>examples</exec_depend>
+  <exec_depend>gazebo_model_spawn</exec_depend>
+  <exec_depend>lite3_description</exec_depend>
+  <test_depend>rostest</test_depend>
+</package>

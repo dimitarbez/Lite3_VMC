@@ -32,6 +32,7 @@
 #include <gazebo_msgs/SetModelConfiguration.h>
 #include <gazebo_msgs/SetPhysicsProperties.h>
 #include <std_srvs/Empty.h>
+#include <std_msgs/Bool.h>
 
 #include <controller_manager/controller_manager.h>
 #include <controller_manager_msgs/ListControllerTypes.h>
@@ -185,6 +186,11 @@ int main(int argc, char **argv)
     // SwitchModeReceiver *switchModeReceiver = new SwitchModeReceiver(nh, privateNh);
     ROS_INFO("ROS Modules Init Finished");
 
+    ros::Publisher readyPublisher = nh.advertise<std_msgs::Bool>("/emotion_bot/sim_controller_ready", 1, true);
+    std_msgs::Bool readyMessage;
+    readyMessage.data = true;
+    readyPublisher.publish(readyMessage);
+
     ROS_INFO("TimeSinceReset: %f", quadruped->GetTimeSinceReset());
     GetComPositionInWorldFrame(quadruped, baseStateClient);
 
@@ -214,7 +220,7 @@ int main(int argc, char **argv)
 
     qrTimer timer_main;
 
-    while (ros::ok() && currentTime - startTime < MAX_TIME_SECONDS) {
+    while (ros::ok()) {
         startTimeWall = quadruped->GetTimeSinceReset();
         // if (count % 3 ==0) {
         //     GetComPositionInWorldFrame(quadruped, baseStateClient);
@@ -276,6 +282,8 @@ int main(int argc, char **argv)
     //     quadruped->stateDataFlow.visualizer.Show();
     // }
 
+    readyMessage.data = false;
+    readyPublisher.publish(readyMessage);
     ros::shutdown();
     return 0;
 }

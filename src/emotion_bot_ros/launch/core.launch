@@ -1,0 +1,20 @@
+<launch>
+  <arg name="emotion_bot_path" default="/workspaces/emotion-bot"/>
+  <arg name="backend" default="deterministic"/>
+  <arg name="personality" default="balanced"/>
+  <arg name="seed" default="7"/>
+  <arg name="motion_enabled" default="false"/>
+
+  <group ns="emotion_bot">
+    <rosparam command="load" file="$(find emotion_bot_ros)/config/default.yaml"/>
+    <param name="runtime/emotion_bot_path" value="$(arg emotion_bot_path)"/>
+    <param name="runtime/backend" value="$(arg backend)"/>
+    <param name="runtime/personality" value="$(arg personality)"/>
+    <param name="runtime/seed" value="$(arg seed)"/>
+    <param name="safety/motion_enabled" value="$(arg motion_enabled)"/>
+
+    <node pkg="emotion_bot_ros" type="emotion_adapter.py" name="adapter" output="screen"/>
+    <node pkg="emotion_bot_ros" type="expression_mapper.py" name="expression_mapper" output="screen"/>
+    <node pkg="emotion_bot_ros" type="safety_bridge.py" name="safety_bridge" output="screen" required="true"/>
+  </group>
+</launch>

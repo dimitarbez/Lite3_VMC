@@ -703,8 +703,6 @@ void qrRobotLite3Sim::ApplyAction(const Eigen::MatrixXf &motorCommands, MotorMod
           motorCommandsArray[motorId * 5 + 4] = 0;
       }
 
-   std::cout<<" POSITION_MODE "<<std::endl;
-
   } else if (motorControlMode == TORQUE_MODE) {
       Eigen::Matrix<float, 12, 1> motorCommandsShaped = motorCommands;
       motorCommandsShaped = jointDirection.cwiseProduct(motorCommandsShaped);
@@ -717,8 +715,6 @@ void qrRobotLite3Sim::ApplyAction(const Eigen::MatrixXf &motorCommands, MotorMod
           motorCommandsArray[motorId * 5 + 4] = motorCommandsShaped[motorId];
 
       }
-
-    std::cout<<" TORQUE_MODE "<<std::endl;
 
   } else if (motorControlMode == HYBRID_MODE) {
       Eigen::Matrix<float, 5, 12> motorCommandsShaped = motorCommands;

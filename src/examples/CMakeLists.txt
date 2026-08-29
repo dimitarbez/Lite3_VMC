@@ -8,10 +8,10 @@ if (NOT ${USE_SIM})
     add_definitions(-DNOT_USE_SIM)
 endif()
 
-find_package(catkin REQUIRED quadruped)
+find_package(catkin REQUIRED COMPONENTS quadruped std_msgs)
 
 catkin_package(
-    CATKIN_DEPENDS roscpp quadruped
+    CATKIN_DEPENDS roscpp quadruped std_msgs
 )
 
 include_directories(

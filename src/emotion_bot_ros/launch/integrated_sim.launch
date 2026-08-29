@@ -1,0 +1,38 @@
+<launch>
+  <arg name="gui" default="true"/>
+  <arg name="headless" default="false"/>
+  <arg name="world" default="earth"/>
+  <arg name="motion_enabled" default="false"/>
+  <arg name="emotion_bot_path" default="/workspaces/emotion-bot"/>
+
+  <include file="$(find gazebo_model_spawn)/launch/gazebo_startup.launch">
+    <arg name="wname" value="$(arg world)"/>
+    <arg name="paused" value="false"/>
+    <arg name="gui" value="$(arg gui)"/>
+    <arg name="headless" value="$(arg headless)"/>
+  </include>
+
+  <rosparam file="$(find lite3_description)/config/robot_torque_controllers_lite3.yaml" command="load"/>
+  <param name="robot_description"
+         command="$(find xacro)/xacro --inorder '$(find lite3_description)/xacro/robot.xacro' DEBUG:=false USE_CAMERA:=false"/>
+
+  <node pkg="gazebo_ros" type="spawn_model" name="spawn_lite3"
+        args="-urdf -z 0.4 -model lite3_gazebo -param robot_description -unpause"
+        output="screen"/>
+
+  <node pkg="emotion_bot_ros" type="load_sim_controllers.py" name="lite3_controller_loader"
+        output="screen">
+    <param name="startup_timeout" value="90.0"/>
+  </node>
+
+  <include file="$(find emotion_bot_ros)/launch/core.launch">
+    <arg name="emotion_bot_path" value="$(arg emotion_bot_path)"/>
+    <arg name="motion_enabled" value="$(arg motion_enabled)"/>
+  </include>
+  <param name="/emotion_bot/safety/require_sim_ready" value="true"/>
+
+  <node pkg="emotion_bot_ros" type="sim_ready_runner.py" name="lite3_sim_runner"
+        output="screen" required="true">
+    <param name="startup_timeout" value="120.0"/>
+  </node>
+</launch>

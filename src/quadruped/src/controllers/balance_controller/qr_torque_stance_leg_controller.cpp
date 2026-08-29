@@ -507,7 +507,6 @@ std::tuple<std::map<int, qrMotorCommand>, Eigen::Matrix<float, 3, 4>> TorqueStan
 {
     ++count;
 
-    std::cout <<controlModeStr << std::endl;
 
     /* Update desired linear and angular velocity and acceleration. */
     UpdateDesCommand();
