@@ -76,13 +76,27 @@ void qrTeleKeyboard::run()
     buttons_binding['o'] = 4;//joy RB
     buttons_binding['u'] = 5;//joy RL
 
+    bool postureMode = false;
+    ros::param::param("~posture_mode", postureMode, false);
     std::map<char, std::tuple<int, float>> rockers_binding;
-    rockers_binding['w'] = {4, 0.8};
-    rockers_binding['a'] = {3, 0.8};
-    rockers_binding['s'] = {4, -0.8};
-    rockers_binding['d'] = {3, -0.8};
-    rockers_binding['q'] = {0, 1.0};
-    rockers_binding['e'] = {0, -1.0};
+    if (postureMode) {
+        // Emotion-safe manual mode: keep all four feet planted. The safety
+        // bridge maps these normalized axes to bounded height/roll/pitch.
+        rockers_binding['w'] = {7, -0.6};
+        rockers_binding['s'] = {7, 0.6};
+        rockers_binding['a'] = {6, 0.6};
+        rockers_binding['d'] = {6, -0.6};
+        rockers_binding['q'] = {2, 0.6};
+        rockers_binding['e'] = {2, -0.6};
+        ROS_INFO("Keyboard posture mode: w/s pitch, a/d roll, q/e height");
+    } else {
+        rockers_binding['w'] = {4, 0.8};
+        rockers_binding['a'] = {3, 0.8};
+        rockers_binding['s'] = {4, -0.8};
+        rockers_binding['d'] = {3, -0.8};
+        rockers_binding['q'] = {0, 1.0};
+        rockers_binding['e'] = {0, -1.0};
+    }
 
     while (ros::ok()) {
         key = getch();

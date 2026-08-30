@@ -15,6 +15,7 @@ catkin_python_setup()
 catkin_package()
 
 catkin_install_python(PROGRAMS
+  scripts/chat_adapter.py
   scripts/emotion_adapter.py
   scripts/emotion_chat.py
   scripts/emotion_demo.py
@@ -23,6 +24,7 @@ catkin_install_python(PROGRAMS
   scripts/safety_bridge.py
   scripts/sim_ready_runner.py
   scripts/test_gazebo_e2e.py
+  scripts/test_openai_live.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

@@ -6,7 +6,7 @@ import json
 import math
 from typing import Any, Dict
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 EMOTIONS = (
     "neutral",
     "joy",
@@ -41,6 +41,7 @@ def build_state(
     arousal: float,
     backend: str,
     source: str,
+    turn_id: str = "system",
 ) -> Dict[str, Any]:
     state = {
         "schema_version": SCHEMA_VERSION,
@@ -51,6 +52,7 @@ def build_state(
         "arousal": float(arousal),
         "backend": str(backend),
         "source": str(source),
+        "turn_id": str(turn_id),
     }
     validate_state(state)
     return state
@@ -81,7 +83,7 @@ def validate_state(state: Dict[str, Any]) -> Dict[str, Any]:
         raise ContractError("valence outside [-1, 1]")
     if not 0.0 <= arousal <= 1.0:
         raise ContractError("arousal outside [0, 1]")
-    for field in ("backend", "source"):
+    for field in ("backend", "source", "turn_id"):
         if not isinstance(state.get(field), str) or not state[field]:
             raise ContractError("%s must be a non-empty string" % field)
     return state

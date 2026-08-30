@@ -25,6 +25,7 @@ from std_srvs.srv import SetBool
 
 EXPECTED_NODES = {
     "/gazebo",
+    "/emotion_bot/chat_adapter",
     "/emotion_bot/adapter",
     "/emotion_bot/expression_mapper",
     "/emotion_bot/safety_bridge",
@@ -39,6 +40,9 @@ EXPECTED_CONTROLLERS = {
 }
 MIN_STANDING_HEIGHT_M = 0.18
 MAX_STANDING_HEIGHT_M = 0.40
+EMOTION_SEQUENCE = (
+    "neutral", "joy", "sadness", "anger", "fear", "surprise", "disgust", "curiosity", "affection",
+)
 
 
 def wait_wall(predicate, description, timeout=120.0, interval=0.25):
@@ -72,7 +76,16 @@ def link_sample(get_link):
     if not response.success:
         raise RuntimeError(response.status_message)
     pose = response.link_state.pose.position
+    orientation = response.link_state.pose.orientation
     twist = response.link_state.twist
+    roll = math.atan2(
+        2.0 * (orientation.w * orientation.x + orientation.y * orientation.z),
+        1.0 - 2.0 * (orientation.x * orientation.x + orientation.y * orientation.y),
+    )
+    pitch = math.asin(max(-1.0, min(
+        1.0,
+        2.0 * (orientation.w * orientation.y - orientation.z * orientation.x),
+    )))
     return {
         "x": pose.x,
         "y": pose.y,
@@ -81,11 +94,29 @@ def link_sample(get_link):
         "vy": twist.linear.y,
         "vz": twist.linear.z,
         "yaw_rate": twist.angular.z,
+        "roll": roll,
+        "pitch": pitch,
     }
 
 
 def planar_distance(first, second):
     return math.hypot(second["x"] - first["x"], second["y"] - first["y"])
+
+
+def posture_distance(first, second):
+    return max(
+        abs(second["z"] - first["z"]),
+        abs(second["roll"] - first["roll"]),
+        abs(second["pitch"] - first["pitch"]),
+    )
+
+
+def joint_distance(first, second):
+    """Largest named joint displacement; works across message ordering."""
+    before = dict(zip(first.name, first.position))
+    after = dict(zip(second.name, second.position))
+    shared = set(before).intersection(after)
+    return max((abs(after[name] - before[name]) for name in shared), default=0.0)
 
 
 def assert_standing(sample, phase):
@@ -217,32 +248,62 @@ def main():
             raise RuntimeError("incomplete Lite3 joint state")
         results["joint_count"] = len(joint.name)
         wait_message("/emotion_bot/sim_controller_ready", Bool, lambda msg: msg.data, timeout=120.0)
+        prepared_status = json.loads(
+            wait_message(
+                "/emotion_bot/status", String,
+                lambda msg: json.loads(msg.data).get("stance_prepared", False),
+                timeout=90.0,
+            ).data
+        )
+        if prepared_status.get("motion_enabled") or not prepared_status.get("health_ok"):
+            raise RuntimeError("unsafe prepared-stance status: %s" % prepared_status)
+        results["prepared_stance"] = prepared_status
 
         rospy.wait_for_service("/gazebo/get_link_state", timeout=30.0)
         get_link = rospy.ServiceProxy("/gazebo/get_link_state", GetLinkState)
         rospy.wait_for_service("/emotion_bot/set_motion_enabled", timeout=20.0)
         set_motion = rospy.ServiceProxy("/emotion_bot/set_motion_enabled", SetBool)
-        input_pub = rospy.Publisher("/emotion_bot/input", String, queue_size=10)
+        input_pub = rospy.Publisher("/emotion_bot/chat/input", String, queue_size=10)
         direct_pub = rospy.Publisher("/emotion_bot/expression_cmd", Twist, queue_size=10)
         manual_pub = rospy.Publisher("/emotion_bot/manual_joy", Joy, queue_size=10)
         responses = []
+        states = []
+        safe_commands = []
+        joint_samples = []
+        def remember_joint(message):
+            joint_samples[:] = [message]
         response_sub = rospy.Subscriber(
-            "/emotion_bot/response", String, lambda message: responses.append(message.data), queue_size=10
+            "/emotion_bot/chat/response", String, lambda message: responses.append(message.data), queue_size=10
+        )
+        state_sub = rospy.Subscriber(
+            "/emotion_bot/state", String,
+            lambda message: states.append(json.loads(message.data)), queue_size=20,
+        )
+        safe_sub = rospy.Subscriber(
+            "/emotion_bot/safe_cmd", Twist, lambda message: safe_commands.append(message), queue_size=200
+        )
+        joint_sub = rospy.Subscriber(
+            "/lite3_gazebo/joint_states", JointState, remember_joint, queue_size=1
         )
         rospy.sleep(0.5)
 
         initial_state = json.loads(wait_message("/emotion_bot/state", String).data)
-        input_pub.publish(String(data="event:joy"))
-        changed = json.loads(
-            wait_message(
-                "/emotion_bot/state", String,
-                lambda msg: json.loads(msg.data)["sequence"] > initial_state["sequence"],
-            ).data
+        input_pub.publish(String(data=json.dumps({"turn_id": "gazebo-turn", "text": "event:joy"})))
+        changed = wait_wall(
+            lambda: next(
+                (
+                    state for state in states
+                    if state.get("turn_id") == "gazebo-turn" and state.get("source") == "user"
+                ),
+                None,
+            ),
+            "turn-scoped user emotion state",
+            timeout=10.0,
         )
         if changed["emotion"] != "joy":
             raise RuntimeError("expected joy, got %s" % changed["emotion"])
         wait_wall(lambda: responses[-1] if responses else None, "emotion response", timeout=5.0)
-        response = responses[-1]
+        response = json.loads(responses[-1])["text"]
         results["emotion"] = changed
         results["response"] = response
 
@@ -252,10 +313,17 @@ def main():
             raise RuntimeError("motion enable service failed")
         safe = wait_message(
             "/emotion_bot/safe_cmd", Twist,
-            lambda msg: abs(msg.linear.x) > 0.01,
+            lambda msg: max(abs(msg.linear.z), abs(msg.angular.x), abs(msg.angular.y)) > 0.005,
             timeout=30.0,
         )
-        if abs(safe.linear.x) > 0.100001 or abs(safe.linear.y) > 0.050001 or abs(safe.angular.z) > 0.100001:
+        if (
+            abs(safe.linear.x) > 1e-9
+            or abs(safe.linear.y) > 1e-9
+            or abs(safe.angular.z) > 1e-9
+            or abs(safe.linear.z) > 0.070001
+            or abs(safe.angular.x) > 0.500001
+            or abs(safe.angular.y) > 0.500001
+        ):
             raise RuntimeError("unsafe expression command observed")
 
         peak_distance = 0.0
@@ -264,29 +332,153 @@ def main():
         movement_deadline = time.monotonic() + 45.0
         while time.monotonic() < movement_deadline:
             sample = link_sample(get_link)
-            distance = planar_distance(before, sample)
+            distance = posture_distance(before, sample)
             speed = math.hypot(sample["vx"], sample["vy"])
             if distance > peak_distance:
                 peak_distance = distance
                 moved_sample = sample
             peak_speed = max(peak_speed, speed)
-            if peak_distance >= 0.015:
+            if peak_distance >= 0.008:
                 break
             time.sleep(0.4)
-        if peak_distance < 0.015:
-            raise RuntimeError("Gazebo body did not measurably move")
+        if peak_distance < 0.008:
+            raise RuntimeError("Gazebo body posture did not measurably move")
         assert_standing(moved_sample, "emotion movement")
         results["emotion_motion"] = {
             "before": before,
             "after": moved_sample,
-            "planar_displacement_m": peak_distance,
+            "posture_displacement": peak_distance,
+            "planar_displacement_m": planar_distance(before, moved_sample),
             "peak_planar_speed_mps": peak_speed,
         }
+
+        # Exercise every profile through ROS state publication, rather than
+        # merely observing mapper topics.  Each test starts from the torso's
+        # current physical pose, samples its entrance peak, then samples after
+        # the configured transition has completed to prove the idle loop keeps
+        # expressing the active emotion.  Neutral is intentionally allowed to
+        # settle to exact zero; every other profile must visibly move in Gazebo.
+        profile_results = {}
+        for emotion in EMOTION_SEQUENCE:
+            profile_before = link_sample(get_link)
+            joints_before = wait_message("/lite3_gazebo/joint_states", JointState, timeout=5.0)
+            marker = "gazebo-profile-%s" % emotion
+            input_pub.publish(String(data=json.dumps({"turn_id": marker, "text": "event:%s" % emotion})))
+            profile_state = wait_wall(
+                lambda: next(
+                    (
+                        state for state in states
+                        if state.get("turn_id") == marker and state.get("source") == "user"
+                    ),
+                    None,
+                ),
+                "%s state" % emotion,
+                timeout=10.0,
+            )
+            if profile_state["emotion"] != emotion:
+                raise RuntimeError("expected %s state, got %s" % (emotion, profile_state["emotion"]))
+            transition_peak = 0.0
+            joint_peak = 0.0
+            peak_sample = profile_before
+            # Slow sadness/affection entrances require several simulated
+            # seconds; a wall deadline catches stalled Gazebo time.
+            transition_end = rospy.Time.now() + rospy.Duration(4.0)
+            wall_deadline = time.monotonic() + 30.0
+            while rospy.Time.now() < transition_end and time.monotonic() < wall_deadline:
+                sample = link_sample(get_link)
+                change = posture_distance(profile_before, sample)
+                if change > transition_peak:
+                    transition_peak = change
+                    peak_sample = sample
+                if joint_samples:
+                    joint_peak = max(joint_peak, joint_distance(joints_before, joint_samples[-1]))
+                assert_standing(sample, "%s transition" % emotion)
+                time.sleep(0.20)
+            if rospy.Time.now() < transition_end:
+                raise RuntimeError("simulated time stalled during %s transition" % emotion)
+            idle_before = link_sample(get_link)
+            idle_joints_before = wait_message("/lite3_gazebo/joint_states", JointState, timeout=5.0)
+            # Cover the slowest configured idle half-cycle (sadness) rather
+            # than sampling two nearby points in the same held posture.
+            rospy.sleep(3.0)
+            idle_after = link_sample(get_link)
+            idle_joints_after = wait_message("/lite3_gazebo/joint_states", JointState, timeout=5.0)
+            idle_change = posture_distance(idle_before, idle_after)
+            idle_joint_change = joint_distance(idle_joints_before, idle_joints_after)
+            if emotion != "neutral" and max(transition_peak, joint_peak) < 0.006:
+                raise RuntimeError(
+                    "%s transition was not visibly measurable (torso %.4f, joint %.4f)"
+                    % (emotion, transition_peak, joint_peak)
+                )
+            if emotion != "neutral" and max(idle_change, idle_joint_change) < 0.0005:
+                raise RuntimeError(
+                    "%s idle loop was not visibly measurable (torso %.4f, joint %.4f)"
+                    % (emotion, idle_change, idle_joint_change)
+                )
+            if planar_distance(profile_before, peak_sample) > 0.0401:
+                raise RuntimeError("%s exceeded posture-only planar safety envelope" % emotion)
+            profile_results[emotion] = {
+                "state_sequence": profile_state["sequence"],
+                "transition_displacement": transition_peak,
+                "transition_joint_displacement": joint_peak,
+                "idle_variation": idle_change,
+                "idle_joint_variation": idle_joint_change,
+                "planar_displacement_m": planar_distance(profile_before, peak_sample),
+                "peak": peak_sample,
+            }
+        results["all_emotion_profiles"] = profile_results
+
+        # Interrupt two entrance gestures, then repeat anger once inside and
+        # once beyond its cooldown.  The mapper should blend the rapid change
+        # and replay only the cooled-down trigger; all observed transport stays
+        # within the same stance-only envelope.
+        rapid_sequences = []
+        for index, emotion in enumerate(("anger", "fear", "anger")):
+            marker = "gazebo-rapid-%d" % index
+            input_pub.publish(String(data=json.dumps({"turn_id": marker, "text": "event:%s" % emotion})))
+            rapid = wait_wall(
+                lambda marker=marker: next(
+                    (state for state in states if state.get("turn_id") == marker and state.get("source") == "user"),
+                    None,
+                ),
+                "rapid %s state" % emotion,
+                timeout=10.0,
+            )
+            rapid_sequences.append(rapid["sequence"])
+            if index == 0:
+                rospy.sleep(0.12)
+            elif index == 1:
+                rospy.sleep(0.12)
+        rospy.sleep(0.75)
+        repeat_marker = "gazebo-repeat-anger"
+        input_pub.publish(String(data=json.dumps({"turn_id": repeat_marker, "text": "event:anger"})))
+        wait_wall(
+            lambda: next(
+                (state for state in states if state.get("turn_id") == repeat_marker and state.get("source") == "user"),
+                None,
+            ),
+            "cooled-down repeated anger state",
+            timeout=10.0,
+        )
+        rospy.sleep(0.35)
+        if not safe_commands:
+            raise RuntimeError("no safe commands observed during rapid emotion test")
+        for command in safe_commands[-30:]:
+            if (
+                abs(command.linear.x) > 1e-9 or abs(command.linear.y) > 1e-9 or abs(command.angular.z) > 1e-9
+                or abs(command.linear.z) > 0.070001 or abs(command.angular.x) > 0.500001
+                or abs(command.angular.y) > 0.500001
+            ):
+                raise RuntimeError("rapid emotion change escaped safe posture limits")
+        results["rapid_and_repeated"] = {"state_sequences": rapid_sequences, "safe": True}
 
         set_motion(False)
         wait_message(
             "/emotion_bot/safe_cmd", Twist,
-            lambda msg: msg.linear.x == 0.0 and msg.linear.y == 0.0 and msg.angular.z == 0.0,
+            lambda msg: all(value == 0.0 for value in (
+                msg.linear.x, msg.linear.y, msg.linear.z,
+                msg.angular.x, msg.angular.y, msg.angular.z,
+            )),
             timeout=10.0,
         )
         stopped, stopped_speed = wait_for_planar_stop(get_link)
@@ -297,15 +489,24 @@ def main():
         # prove its independent command watchdog reaches zero.
         rosnode.kill_nodes(["/emotion_bot/expression_mapper"])
         set_motion(True)
+        safe_commands[:] = []
         direct = Twist()
-        direct.linear.x = 0.04
-        # Keep the stimulus alive past the configured stand-to-locomotion dwell;
+        direct.linear.z = 0.015
+        direct.angular.x = 0.035
+        # Keep the stimulus alive past the configured stand transition;
         # then stop publishing so the independent bridge watchdog can expire it.
         publish_for(direct_pub, direct, 2.2)
-        wait_message("/emotion_bot/safe_cmd", Twist, lambda msg: msg.linear.x > 0.01, timeout=10.0)
+        wait_wall(
+            lambda: any(message.linear.z > 0.005 for message in safe_commands),
+            "bounded direct command before watchdog expiry",
+            timeout=10.0,
+        )
         stale_zero = wait_message(
             "/emotion_bot/safe_cmd", Twist,
-            lambda msg: msg.linear.x == 0.0 and msg.linear.y == 0.0 and msg.angular.z == 0.0,
+            lambda msg: all(value == 0.0 for value in (
+                msg.linear.x, msg.linear.y, msg.linear.z,
+                msg.angular.x, msg.angular.y, msg.angular.z,
+            )),
             timeout=15.0,
         )
         status = json.loads(
@@ -315,23 +516,23 @@ def main():
                 timeout=10.0,
             ).data
         )
-        results["watchdog"] = {"zero": stale_zero.linear.x == 0.0, "status": status}
+        results["watchdog"] = {"zero": stale_zero.linear.z == 0.0, "status": status}
 
-        # Reproduce the keyboard B/X/axis sequence on the arbitrated manual
-        # topic; manual has priority over an emotion command.
+        # Manual posture has priority. Locomotion buttons and axes remain
+        # blocked unless the experimental allow_locomotion parameter is true.
         manual_before = link_sample(get_link)
         joy = Joy()
         joy.axes = [0.0] * 8
         joy.buttons = [0] * 11
-        joy.buttons[1] = 1
-        manual_pub.publish(joy)
-        rospy.sleep(1.6)
-        joy.buttons = [0] * 11
         joy.buttons[2] = 1
         manual_pub.publish(joy)
-        rospy.sleep(0.5)
+        blocked_x = wait_message(
+            "/emotion_bot/joy_out", Joy,
+            lambda msg: len(msg.buttons) > 2 and msg.buttons[2] == 0,
+            timeout=5.0,
+        )
         joy.buttons = [0] * 11
-        joy.axes[4] = 0.4
+        joy.axes[6] = 0.4
         publish_for(manual_pub, joy, 2.0)
         manual_status = json.loads(
             wait_message(
@@ -342,14 +543,15 @@ def main():
         )
         rospy.sleep(0.5)
         manual_after = link_sample(get_link)
-        manual_distance = planar_distance(manual_before, manual_after)
+        manual_distance = posture_distance(manual_before, manual_after)
         if manual_distance < 0.008:
-            raise RuntimeError("manual Joy path did not measurably move Gazebo")
+            raise RuntimeError("manual posture path did not measurably move Gazebo")
         assert_standing(manual_after, "manual movement")
         results["manual_motion"] = {
             "before": manual_before,
             "after": manual_after,
-            "planar_displacement_m": manual_distance,
+            "posture_displacement": manual_distance,
+            "locomotion_button_blocked": blocked_x.buttons[2] == 0,
             "status": manual_status,
         }
 

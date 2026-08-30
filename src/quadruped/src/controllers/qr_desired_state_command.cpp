@@ -227,7 +227,10 @@ Quadruped::qrDesiredStateCommand::qrDesiredStateCommand(ros::NodeHandle &nhIn, q
     joyCtrlState = RC_MODE::BODY_UP;
     prevJoyCtrlState = RC_MODE::BODY_DOWN;
 
-    joycmdBodyHeight = robotIn->bodyHeight;
+    nominalBodyHeight = robotIn->bodyHeight;
+    joycmdBodyHeight = nominalBodyHeight;
+    joyCmdRoll = 0.f;
+    joyCmdPitch = 0.f;
     isSim = robotIn->isSim;
     joyCmdVz = joyCmdVx = joyCmdVy = 0;
     joyCmdYawRate = joyCmdRollRate = joyCmdPitchRate = 0;
@@ -254,7 +257,18 @@ Quadruped::qrDesiredStateCommand::qrDesiredStateCommand(ros::NodeHandle &nhIn, q
 
 void Quadruped::qrDesiredStateCommand::JoyCallback(const sensor_msgs::Joy::ConstPtr &joy_msg)
 {
+    if (joy_msg->axes.size() < 8 || joy_msg->buttons.size() < 6) {
+        ROS_WARN_THROTTLE(1.0, "Ignoring malformed Joy command: expected at least 8 axes and 6 buttons");
+        return;
+    }
+
     joyCmdVz = 0;
+    joycmdBodyHeight = clip(
+        nominalBodyHeight + joy_msg->axes[2] * EMOTION_HEIGHT_OFFSET_MAX,
+        BODY_HEIGHT_MIN,
+        BODY_HEIGHT_MAX);
+    joyCmdRoll = clip(joy_msg->axes[6] * EMOTION_ROLL_MAX, -EMOTION_ROLL_MAX, EMOTION_ROLL_MAX);
+    joyCmdPitch = clip(joy_msg->axes[7] * EMOTION_PITCH_MAX, -EMOTION_PITCH_MAX, EMOTION_PITCH_MAX);
 
     /* If A key is pressed, joy control will be enabled or disabled
      * currently the joy control is enabled by default
@@ -272,6 +286,21 @@ void Quadruped::qrDesiredStateCommand::JoyCallback(const sensor_msgs::Joy::Const
     rosCmdRequest = !joyCtrlOnRequest;
 
     if (joyCtrlOnRequest || rosCmdRequest) {
+        // RB/RL are reserved by emotion_bot_ros for bounded, one-shot
+        // simulation expressions.  They are accepted only in torque stance,
+        // so this path cannot enter or steer a locomotion gait.
+        if (joyCtrlState == RC_MODE::JOY_STAND) {
+            if (joy_msg->buttons[4] == 1) {
+                expressionAction = ExpressionAction::HOP;
+                expressionActionStartedAt = ros::Time::now().toSec();
+                ROS_INFO("Emotion hop requested in stance");
+            } else if (joy_msg->buttons[5] == 1) {
+                expressionAction = ExpressionAction::STOMP;
+                expressionActionStartedAt = ros::Time::now().toSec();
+                ROS_INFO("Emotion stomp requested in stance");
+            }
+        }
+
         /* X key. */
         if (joy_msg->buttons[2] == 1) {
             if (movementMode > 0) {
@@ -309,6 +338,8 @@ void Quadruped::qrDesiredStateCommand::JoyCallback(const sensor_msgs::Joy::Const
 
         /* If B key is pressed, the quadruped will stop troting and stand by MPC controller. */
         if (joy_msg->buttons[1] == 1) {
+            expressionAction = ExpressionAction::NONE;
+            expressionActionStartedAt = -1.0;
             ROS_INFO("You have pressed the stop button!!!!\n");
             if (movementMode == 0) {
                 if (bodyUp > 0) {
@@ -441,17 +472,56 @@ void Quadruped::qrDesiredStateCommand::Update()
         filteredOmega << joyCmdRollRate, joyCmdPitchRate, joyCmdYawRate;
     }
 
+    float actionHeight = joycmdBodyHeight;
+    float actionVz = 0.f;
+    if (joyCtrlState == RC_MODE::JOY_STAND && expressionAction != ExpressionAction::NONE) {
+        const double elapsed = ros::Time::now().toSec() - expressionActionStartedAt;
+        if (elapsed < 0.0) {
+            expressionAction = ExpressionAction::NONE;
+        } else if (expressionAction == ExpressionAction::HOP) {
+            // Compress, then drive all four legs down together.  The short
+            // recovery prevents the stance controller from holding a jump.
+            if (elapsed < 0.12) {
+                actionHeight = nominalBodyHeight - EXPRESSION_ACTION_CROUCH;
+                actionVz = EXPRESSION_ACTION_DOWN_VELOCITY;
+            } else if (elapsed < 0.27) {
+                actionHeight = nominalBodyHeight + EXPRESSION_ACTION_HEIGHT;
+                actionVz = EXPRESSION_ACTION_UP_VELOCITY;
+            } else if (elapsed < 0.50) {
+                actionHeight = nominalBodyHeight + 0.015f;
+                actionVz = 0.f;
+            } else {
+                expressionAction = ExpressionAction::NONE;
+            }
+        } else if (expressionAction == ExpressionAction::STOMP) {
+            // Raise to make the downward return visibly percussive while all
+            // four feet remain coordinated by the stance controller.
+            if (elapsed < 0.14) {
+                actionHeight = nominalBodyHeight + 0.018f;
+                actionVz = 0.14f;
+            } else if (elapsed < 0.30) {
+                actionHeight = nominalBodyHeight - EXPRESSION_ACTION_CROUCH;
+                actionVz = EXPRESSION_ACTION_DOWN_VELOCITY;
+            } else if (elapsed < 0.48) {
+                actionHeight = nominalBodyHeight;
+                actionVz = 0.f;
+            } else {
+                expressionAction = ExpressionAction::NONE;
+            }
+        }
+    }
+
     stateDes(0) = dt * stateDes(6);
     stateDes(1) = dt * stateDes(7);
-    stateDes(2) = joycmdBodyHeight;
+    stateDes(2) = joyCtrlState == RC_MODE::JOY_STAND ? actionHeight : nominalBodyHeight;
 
-    stateDes(3) = 0.0;
-    stateDes(4) = clip(filteredOmega[1]*dt, MIN_PITCH, MAX_PITCH);
+    stateDes(3) = joyCtrlState == RC_MODE::JOY_STAND ? joyCmdRoll : 0.0;
+    stateDes(4) = joyCtrlState == RC_MODE::JOY_STAND ? joyCmdPitch : clip(filteredOmega[1]*dt, MIN_PITCH, MAX_PITCH);
     stateDes(5) = dt * stateDes(11);
 
     stateDes(6) = clip(filteredVel[0], MIN_VELX, MAX_VELX);
     stateDes(7) = clip(filteredVel[1], MIN_VELY, MAX_VELY);
-    stateDes(8) = 0.0;
+    stateDes(8) = joyCtrlState == RC_MODE::JOY_STAND ? actionVz : 0.0;
 
     stateDes(9) = 0.0;
     stateDes(10) = 0.0;
@@ -511,4 +581,3 @@ void Quadruped::qrDesiredStateCommand::PrintStateCommandInfo()
         printIter = 0;
     }
 }
-

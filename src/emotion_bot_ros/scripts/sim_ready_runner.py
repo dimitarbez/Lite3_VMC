@@ -46,7 +46,19 @@ class SimRunner:
 
     def run(self):
         self.wait_until_ready()
-        command = ["rosrun", "examples", "example_lite3_sim", "/joy:=/emotion_bot/joy_out"]
+        # The upstream examples package builds this target but does not install
+        # it. `rosrun` therefore finds an old source-tree placeholder after a
+        # clean catkin build even though the fresh devel-space binary exists.
+        # Prefer the active overlay binary; retain rosrun only for an unusual
+        # installed workspace layout.
+        executable = None
+        for prefix in os.environ.get("CMAKE_PREFIX_PATH", "").split(":"):
+            candidate = os.path.join(prefix, "lib", "examples", "example_lite3_sim")
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                executable = candidate
+                break
+        command = ([executable] if executable else ["rosrun", "examples", "example_lite3_sim"])
+        command.append("/joy:=/emotion_bot/joy_out")
         rospy.loginfo("Starting Lite3 simulation controller through the arbitrated Joy path")
         self.child = subprocess.Popen(command)
         while not rospy.is_shutdown() and self.child.poll() is None:

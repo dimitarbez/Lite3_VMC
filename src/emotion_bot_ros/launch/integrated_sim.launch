@@ -4,6 +4,8 @@
   <arg name="world" default="earth"/>
   <arg name="motion_enabled" default="false"/>
   <arg name="emotion_bot_path" default="/workspaces/emotion-bot"/>
+  <arg name="chat_backend" default="deterministic"/>
+  <arg name="chat_model" default="gpt-5-mini"/>
 
   <include file="$(find gazebo_model_spawn)/launch/gazebo_startup.launch">
     <arg name="wname" value="$(arg world)"/>
@@ -28,8 +30,12 @@
   <include file="$(find emotion_bot_ros)/launch/core.launch">
     <arg name="emotion_bot_path" value="$(arg emotion_bot_path)"/>
     <arg name="motion_enabled" value="$(arg motion_enabled)"/>
+    <arg name="chat_backend" value="$(arg chat_backend)"/>
+    <arg name="chat_model" value="$(arg chat_model)"/>
   </include>
   <param name="/emotion_bot/safety/require_sim_ready" value="true"/>
+  <param name="/emotion_bot/safety/monitor_sim_health" value="true"/>
+  <param name="/emotion_bot/safety/prepare_stance_on_ready" value="true"/>
 
   <node pkg="emotion_bot_ros" type="sim_ready_runner.py" name="lite3_sim_runner"
         output="screen" required="true">

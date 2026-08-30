@@ -203,6 +203,7 @@ void MPCStanceLegController::SetupCommand()
 
     rollDes = desiredStateCommand->stateDes(3);
     pitchDes = desiredStateCommand->stateDes(4);
+    rpyComp[0] = rollDes;
 }
 
 
@@ -218,7 +219,8 @@ void MPCStanceLegController::Run(std::map<int, qrMotorCommand> &legCommand, int 
     Vec3<float> rpy = robot->GetBaseRollPitchYaw();
 
 
-    Vec3<float> vDesRobot(xVelDes, yVelDes, 0); /* Desired linear velocity in body frame. */
+    const float z_vel_cmd = clip(desiredStateCommand->stateDes(8), -0.70f, 0.70f);
+    Vec3<float> vDesRobot(xVelDes, yVelDes, z_vel_cmd); /* Desired linear velocity in body frame. */
     vDesWorld = seResult.baseRMat * vDesRobot; /* Desired linear velocity in world frame. */
     Vec3<float> v_robot = seResult.baseVInWorldFrame; /* Actual linear velocity in world frame. */
     pFoot = robot->GetFootPositionsInWorldFrame(); /* Actual foot positions in world frame. */
@@ -322,7 +324,7 @@ void MPCStanceLegController::Run(std::map<int, qrMotorCommand> &legCommand, int 
 
         seResult.wbcData.vBody_des[0] = vDesWorld[0];
         seResult.wbcData.vBody_des[1] = vDesWorld[1];
-        seResult.wbcData.vBody_des[2] = 0.;
+        seResult.wbcData.vBody_des[2] = vDesWorld[2];
 
         seResult.wbcData.aBody_des.setZero();
 
@@ -370,7 +372,7 @@ void MPCStanceLegController::UpdateMPC(qrRobot *robot)
         float trajInitial[12] = {rpyComp[0],   rpyComp[1] + pitch_offset,   yawDesTrue,
                                  xStart,       yStart,       bodyHeight,
                                  omega_des[0], omega_des[1], omega_des[2],
-                                 vDesWorld[0], vDesWorld[1], 0.f};
+                                 vDesWorld[0], vDesWorld[1], vDesWorld[2]};
 
         /* Predict the future state by accmulating the velocity. */
         for (int i = 0; i < horizonLength; ++i) {
@@ -381,6 +383,7 @@ void MPCStanceLegController::UpdateMPC(qrRobot *robot)
                 trajAll[12 * i + 2] = trajAll[12 * (i - 1) + 2] + dtMPC * yawTurnRate;
                 trajAll[12 * i + 3] = trajAll[12 * (i - 1) + 3] + dtMPC * vDesWorld[0];
                 trajAll[12 * i + 4] = trajAll[12 * (i - 1) + 4] + dtMPC * vDesWorld[1];
+                trajAll[12 * i + 5] = trajAll[12 * (i - 1) + 5] + dtMPC * vDesWorld[2];
             }
         }
         SolveDenseMPC(robot);

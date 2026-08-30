@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
 import json
 import os
+import threading
+import time
 import unittest
 
 import yaml
 
 from emotion_bot_ros.contract import ContractError, EMOTIONS, build_state, dumps_state, loads_state
-from emotion_bot_ros.mapping import PatternPlayer, TwistValue, load_patterns
+from emotion_bot_ros.conversation import (
+    ConversationCoordinator,
+    ConversationError,
+    DeterministicChatBackend,
+    TurnGate,
+    validate_conversation_event,
+)
+from emotion_bot_ros.mapping import (
+    EXPRESSION_ACTIONS,
+    FluidExpressionController,
+    PatternPlayer,
+    TwistValue,
+    load_patterns,
+)
 from emotion_bot_ros.safety import JoyValue, Limits, SafetyController, clamp_twist
 
 
@@ -20,6 +35,7 @@ class ContractTests(unittest.TestCase):
         for sequence, emotion in enumerate(EMOTIONS):
             state = build_state(FakeTime(), sequence, emotion, -1.0, 1.0, "deterministic", "test")
             self.assertEqual(loads_state(dumps_state(state)), state)
+            self.assertEqual(state["turn_id"], "system")
 
     def test_malformed_and_out_of_bounds_rejected(self):
         with self.assertRaises(ContractError):
@@ -37,38 +53,131 @@ class MappingAndSafetyTests(unittest.TestCase):
         with open(config_path, "r", encoding="utf-8") as stream:
             cls.patterns = load_patterns(yaml.safe_load(stream)["mappings"])
 
-    def test_all_nine_mappings_are_finite(self):
+    def test_all_nine_profiles_have_bounded_transition_and_sustained_idle(self):
         self.assertEqual(set(self.patterns), set(EMOTIONS))
         player = PatternPlayer(self.patterns)
         for emotion in EMOTIONS:
             player.start(emotion, 10.0)
             self.assertIsInstance(player.command(10.0), TwistValue)
-            self.assertEqual(player.command(30.0), TwistValue())
+            # An emotion never falls silently through to zero: after its
+            # entrance gesture it loops its designed idle body language.
+            self.assertGreaterEqual(player.segment(30.0)[1], len(self.patterns[emotion].transition))
+            self.assertTrue(self.patterns[emotion].idle)
+
+    def test_anger_is_a_planted_stomp_like_brace(self):
+        stomp = [segment.twist for segment in self.patterns["anger"].transition]
+        self.assertGreater(max(value.z for value in stomp), 0.0)
+        self.assertLess(min(value.z for value in stomp), 0.0)
+        self.assertLessEqual(max(abs(value.roll) for value in stomp), 0.50)
+        self.assertEqual(
+            [segment.action for segment in self.patterns["anger"].transition if segment.action != "none"], []
+        )
+        self.assertEqual(
+            [segment.action for segment in self.patterns["surprise"].transition if segment.action != "none"], []
+        )
+
+    def test_fluid_filter_blend_dwell_hysteresis_rate_and_neutral_decay(self):
+        controller = FluidExpressionController(
+            self.patterns,
+            min_dwell=0.30,
+            hysteresis=0.12,
+            max_linear_rate=0.10,
+            max_yaw_rate=0.20,
+        )
+        controller.command(0.0)
+        controller.update("joy", 0.7, 0.6, 0.0)
+        first = controller.command(0.20)
+        self.assertEqual(controller.selected_emotion, "joy")
+        self.assertGreater(first.z, 0.0)
+        self.assertGreater(first.roll, 0.0)
+        self.assertLessEqual(first.z, 0.024001)
+        self.assertLessEqual(first.roll, 0.048001)
+        self.assertLess(controller.filtered_arousal, 0.6)
+
+        # A meaningful affect change within the same category restarts the
+        # finite gesture instead of silently changing only its scalar target.
+        original_start = controller.player.started_at
+        controller.update("joy", 0.7, 0.75, 0.62)
+        self.assertGreater(controller.player.started_at, original_start)
+        self.assertEqual(controller.selected_emotion, "joy")
+
+        # Explicit category changes interrupt immediately, and their output
+        # is cross-faded rather than delayed by a dwell timer.
+        controller.update("curiosity", 0.71, 0.61, 0.63)
+        self.assertEqual(controller.selected_emotion, "curiosity")
+        controller.update("anger", -0.6, 0.8, 0.64)
+        self.assertEqual(controller.selected_emotion, "anger")
+        controller.command(0.95)
+        self.assertEqual(controller.selected_emotion, "anger")
+
+        previous = controller.command(1.05)
+        stale = controller.command(1.15, stale=True)
+        self.assertLessEqual(abs(stale.x - previous.x), 0.010001)
+        for index in range(1, 30):
+            stale = controller.command(1.15 + index * 0.10, stale=True)
+        self.assertEqual(stale, TwistValue())
+        self.assertEqual(controller.selected_emotion, "neutral")
+
+    def test_default_profiles_never_emit_discrete_actions(self):
+        controller = FluidExpressionController(self.patterns)
+        controller.update("surprise", 0.0, 1.0, 0.0)
+        self.assertEqual(controller.selected_emotion, "surprise")
+        controller.command(0.0)
+        self.assertEqual(controller.consume_action(0.0), "none")
+        self.assertEqual(controller.consume_action(0.2), "none")
+        self.assertEqual(controller.consume_action(0.3, stale=True), "none")
+
+    def test_rapid_changes_blend_and_repeated_emotion_respects_cooldown(self):
+        controller = FluidExpressionController(self.patterns, min_dwell=0.0)
+        controller.update("joy", 0.7, 0.8, 0.0)
+        first = controller.command(0.25)
+        controller.update("fear", -0.6, 0.8, 0.26)
+        changed = controller.command(0.27)
+        self.assertEqual(controller.selected_emotion, "fear")
+        # Cross-fading prevents an unsafe discontinuity on an interruption.
+        self.assertLess(abs(changed.z - first.z), 0.10)
+        start = controller.player.started_at
+        controller.update("fear", -0.6, 0.8, 0.30)
+        self.assertEqual(controller.player.started_at, start)
+        controller.update("fear", -0.6, 0.8, 0.80)
+        self.assertGreater(controller.player.started_at, start)
 
     def test_clamps_every_expression_axis(self):
-        result = clamp_twist(TwistValue(5.0, -6.0, float("nan")), Limits())
-        self.assertEqual(result, TwistValue(0.10, -0.05, 0.0))
+        result = clamp_twist(
+            TwistValue(x=5.0, y=-6.0, yaw=float("nan"), z=2.0, roll=-2.0, pitch=2.0),
+            Limits(),
+        )
+        self.assertEqual(
+            result,
+            TwistValue(x=0.10, y=-0.05, yaw=0.0, z=0.070, roll=-0.50, pitch=0.50),
+        )
 
     def test_disabled_stale_disable_and_manual_priority(self):
         controller = SafetyController(Limits(), expression_timeout=0.5)
-        controller.update_expression(TwistValue(0.5, 0.5, 0.5), 0.0)
+        controller.update_expression(TwistValue(z=0.5, roll=0.5, pitch=0.5), 0.0)
         disabled = controller.step(0.1)
         self.assertEqual(disabled.twist, TwistValue())
 
         controller.set_enabled(True, 0.1)
-        controller.update_expression(TwistValue(0.5, 0.5, 0.5), 0.1)
+        controller.update_expression(TwistValue(z=0.5, roll=0.5, pitch=0.5), 0.1)
         controller.step(0.1)
         controller.step(0.5)
         bounded = controller.step(0.6)
-        self.assertEqual(bounded.twist, TwistValue(0.10, 0.05, 0.10))
+        self.assertGreater(bounded.twist.z, 0.0)
+        self.assertGreater(bounded.twist.roll, 0.0)
+        self.assertLessEqual(bounded.twist.z, 0.070)
+        self.assertLessEqual(bounded.twist.roll, 0.50)
+        self.assertEqual(bounded.twist.x, 0.0)
 
         axes = [0.0] * 8
-        axes[4] = -0.4
+        axes[6] = -0.4
         controller.update_manual(axes, [0] * 11, 0.61)
         manual = controller.step(0.62)
         self.assertEqual(manual.selected_source, "manual")
 
         stale = controller.step(1.3)
+        for moment in (1.4, 1.5, 1.6):
+            stale = controller.step(moment)
         self.assertEqual(stale.twist, TwistValue())
         self.assertTrue(stale.stale)
 
@@ -79,9 +188,262 @@ class MappingAndSafetyTests(unittest.TestCase):
         def decisions():
             controller = SafetyController(Limits())
             controller.set_enabled(True, 0.0)
-            controller.update_expression(TwistValue(0.04, 0.0, 0.02), 0.0)
+            controller.update_expression(TwistValue(z=0.01, roll=0.03), 0.0)
             return [controller.step(moment) for moment in (0.0, 0.4, 0.45)]
         self.assertEqual(decisions(), decisions())
+
+    def test_manual_mode_button_is_a_single_pulse(self):
+        controller = SafetyController(Limits(), allow_locomotion=True)
+        controller.set_enabled(True, 0.0)
+        buttons = [0] * 11
+        buttons[2] = 1
+        controller.update_manual([0.0] * 8, buttons, 0.0)
+        first = controller.step(0.01)
+        second = controller.step(0.02)
+        self.assertEqual(first.joy.buttons[2], 1)
+        self.assertEqual(second.joy.buttons[2], 0)
+
+    def test_stance_can_be_prepared_while_motion_permission_is_disabled(self):
+        controller = SafetyController(Limits())
+        controller.request_stance_preparation(1.0)
+        first = controller.step(1.0)
+        second = controller.step(1.1)
+        self.assertFalse(controller.motion_enabled)
+        self.assertEqual(first.joy.buttons[1], 1)
+        self.assertEqual(second.joy.buttons[1], 0)
+        self.assertTrue(controller.stand_ready)
+
+        controller.set_enabled(True, 1.1)
+        controller.update_expression(TwistValue(z=0.01, roll=0.02), 1.1)
+        expression = controller.step(1.2)
+        self.assertEqual(expression.joy.buttons[1], 0)
+        self.assertGreater(expression.twist.z, 0.0)
+        self.assertGreater(expression.twist.roll, 0.0)
+
+    def test_locomotion_is_blocked_by_default_but_posture_is_allowed(self):
+        controller = SafetyController(Limits())
+        controller.set_enabled(True, 0.0)
+        controller.update_expression(TwistValue(x=0.05, z=0.01, roll=0.03), 0.0)
+        self.assertEqual(controller.step(0.0).joy.buttons[1], 1)
+        controller.step(0.4)
+        decision = controller.step(0.5)
+        self.assertEqual(decision.twist.x, 0.0)
+        self.assertGreater(decision.twist.z, 0.0)
+        self.assertGreater(decision.twist.roll, 0.0)
+        self.assertEqual(decision.joy.axes[4], 0.0)
+
+    def test_dynamic_actions_are_one_shot_and_never_enable_locomotion(self):
+        controller = SafetyController(Limits())
+        controller.request_stance_preparation(0.0)
+        controller.step(0.0)
+        controller.set_enabled(True, 0.1)
+        controller.update_expression(TwistValue(z=0.02), 0.1)
+        controller.update_expression_action("hop", 0.1)
+        hop = controller.step(0.11)
+        self.assertEqual(hop.joy.buttons[4], 1)
+        self.assertEqual(hop.joy.buttons[5], 0)
+        self.assertEqual(hop.joy.axes[4], 0.0)
+        self.assertEqual(hop.joy.axes[3], 0.0)
+        self.assertEqual(hop.joy.axes[0], 0.0)
+        self.assertEqual(controller.step(0.12).joy.buttons[4], 0)
+
+        controller.update_expression_action("stomp", 0.2)
+        stomp = controller.step(0.21)
+        self.assertEqual(stomp.joy.buttons[4], 0)
+        self.assertEqual(stomp.joy.buttons[5], 1)
+
+        # A String action may arrive one ROS tick before its cross-faded Twist.
+        # It remains eligible only while the same fresh watchdog is active.
+        early = SafetyController(Limits())
+        early.request_stance_preparation(0.0)
+        early.step(0.0)
+        early.set_enabled(True, 0.1)
+        early.update_expression(TwistValue(), 0.1)
+        early.update_expression_action("hop", 0.1)
+        self.assertEqual(early.step(0.11).joy.buttons[4], 1)
+
+        blocked = SafetyController(Limits(), allow_dynamic_actions=False)
+        blocked.request_stance_preparation(0.0)
+        blocked.step(0.0)
+        blocked.set_enabled(True, 0.1)
+        blocked.update_expression(TwistValue(z=0.02), 0.1)
+        blocked.update_expression_action("hop", 0.1)
+        self.assertEqual(blocked.step(0.11).joy.buttons[4], 0)
+
+    def test_motion_disabled_in_configuration(self):
+        config_path = os.path.join(os.path.dirname(__file__), "..", "config", "default.yaml")
+        with open(config_path, "r", encoding="utf-8") as stream:
+            config = yaml.safe_load(stream)
+        self.assertFalse(config["safety"]["motion_enabled"])
+        self.assertFalse(config["safety"]["allow_locomotion"])
+        self.assertFalse(config["safety"]["allow_dynamic_actions"])
+        self.assertEqual(config["chat"]["backend"], "deterministic")
+        for profile in self.patterns.values():
+            self.assertTrue(0.0 <= profile.intensity <= 1.0)
+            self.assertGreater(profile.duration, 0.0)
+            self.assertGreater(profile.speed, 0.0)
+            self.assertGreater(profile.acceleration, 0.0)
+            self.assertGreaterEqual(profile.cooldown, 0.0)
+            self.assertGreaterEqual(profile.variation, 0.0)
+            self.assertGreater(profile.transition_blend, 0.0)
+            for segment in profile.transition + profile.idle:
+                self.assertFalse(segment.twist.has_locomotion())
+                self.assertIn(segment.action, EXPRESSION_ACTIONS)
+
+
+class ConversationTests(unittest.TestCase):
+    @staticmethod
+    def wait_for(predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        raise AssertionError("timed out waiting for conversation event")
+
+    def test_deterministic_stream_has_turn_ids_and_completed_text(self):
+        events = []
+        coordinator = ConversationCoordinator(DeterministicChatBackend(), events.append)
+        turn_id = coordinator.submit("I am happy")
+        self.wait_for(lambda: any(item["type"] == "completed" for item in events))
+        self.assertEqual(turn_id, "turn-000001")
+        for event in events:
+            validate_conversation_event(event)
+        self.assertTrue(any(item["type"] == "delta" for item in events))
+        final = [item for item in events if item["type"] == "completed"][0]
+        self.assertTrue(final["text"])
+        coordinator.shutdown()
+
+    def test_retry_failure_and_offline_fallback_are_bounded(self):
+        class FailingBackend:
+            name = "failing"
+
+            def __init__(self):
+                self.calls = 0
+
+            def stream(self, *_args):
+                self.calls += 1
+                raise RuntimeError("secret-shaped provider error must not escape")
+
+        failing = FailingBackend()
+        events = []
+        coordinator = ConversationCoordinator(
+            failing,
+            events.append,
+            fallback_backend=DeterministicChatBackend(),
+            max_retries=1,
+            retry_delay=0.0,
+        )
+        coordinator.submit("hello")
+        self.wait_for(lambda: any(item["type"] == "completed" for item in events))
+        self.assertEqual(failing.calls, 2)
+        self.assertEqual(len([item for item in events if item["type"] == "retrying"]), 1)
+        self.assertTrue(any(item["type"] == "offline_fallback" for item in events))
+        self.assertNotIn("secret-shaped", str(events))
+        coordinator.shutdown()
+
+    def test_timeout_uses_graceful_offline_fallback(self):
+        class TimedOutBackend:
+            name = "openai"
+
+            def stream(self, *_args):
+                raise TimeoutError("simulated request deadline")
+
+        events = []
+        coordinator = ConversationCoordinator(
+            TimedOutBackend(),
+            events.append,
+            fallback_backend=DeterministicChatBackend(),
+            max_retries=0,
+        )
+        coordinator.submit("hello")
+        self.wait_for(lambda: any(item["type"] == "completed" for item in events))
+        self.assertTrue(any(item["type"] == "offline_fallback" for item in events))
+        self.assertFalse(any(item["type"] == "error" for item in events))
+        self.assertNotIn("request deadline", str(events))
+        coordinator.shutdown()
+
+    def test_superseded_turn_cannot_complete_out_of_order(self):
+        class SlowBackend:
+            name = "slow"
+
+            def stream(self, text, _history, _emotion, cancel):
+                if text == "first":
+                    cancel.wait(1.0)
+                    yield "late"
+                else:
+                    yield "current"
+
+        events = []
+        coordinator = ConversationCoordinator(SlowBackend(), events.append, max_retries=0)
+        first = coordinator.submit("first")
+        second = coordinator.submit("second")
+        self.wait_for(
+            lambda: any(item["type"] == "completed" and item["turn_id"] == second for item in events)
+        )
+        self.assertTrue(any(item["type"] == "cancelled" and item["turn_id"] == first for item in events))
+        self.assertFalse(any(item["type"] == "completed" and item["turn_id"] == first for item in events))
+        coordinator.shutdown()
+
+    def test_completed_turn_is_not_cancelled_by_next_turn_and_ids_are_unique(self):
+        events = []
+        coordinator = ConversationCoordinator(DeterministicChatBackend(), events.append)
+        first = coordinator.submit("first", turn_id="stable-id")
+        self.wait_for(
+            lambda: any(item["type"] == "completed" and item["turn_id"] == first for item in events)
+        )
+        second = coordinator.submit("second")
+        self.wait_for(
+            lambda: any(item["type"] == "completed" and item["turn_id"] == second for item in events)
+        )
+        self.assertFalse(any(item["type"] == "cancelled" and item["turn_id"] == first for item in events))
+        with self.assertRaises(ConversationError):
+            coordinator.submit("duplicate", turn_id="stable-id")
+        coordinator.shutdown()
+
+    def test_partial_stream_failure_is_terminal_without_replaying_text(self):
+        class PartialBackend:
+            name = "partial"
+
+            def stream(self, *_args):
+                yield "visible once"
+                raise RuntimeError("failed after first delta")
+
+        events = []
+        coordinator = ConversationCoordinator(
+            PartialBackend(),
+            events.append,
+            fallback_backend=DeterministicChatBackend(),
+            max_retries=1,
+        )
+        coordinator.submit("hello")
+        self.wait_for(lambda: any(item["type"] == "error" for item in events))
+        self.assertEqual(len([item for item in events if item["type"] == "delta"]), 1)
+        self.assertFalse(any(item["type"] in ("retrying", "offline_fallback", "completed") for item in events))
+        coordinator.shutdown()
+
+    def test_turn_gate_rejects_cancelled_duplicate_and_late_assistant(self):
+        def event(turn_id, index, kind, text="text"):
+            result = {
+                "schema_version": "1.0",
+                "stamp": 1.0,
+                "turn_id": turn_id,
+                "turn_index": index,
+                "type": kind,
+            }
+            if kind in ("accepted", "completed", "delta"):
+                result["text"] = text
+            return result
+
+        gate = TurnGate()
+        self.assertTrue(gate.accepts(event("one", 1, "accepted")))
+        self.assertTrue(gate.accepts(event("two", 2, "accepted")))
+        self.assertFalse(gate.accepts(event("one", 1, "completed")))
+        gate.accepts(event("two", 2, "cancelled"))
+        self.assertFalse(gate.accepts(event("two", 2, "completed")))
+        self.assertTrue(gate.accepts(event("three", 3, "accepted")))
+        self.assertTrue(gate.accepts(event("three", 3, "completed")))
+        self.assertFalse(gate.accepts(event("three", 3, "completed")))
 
 
 if __name__ == "__main__":

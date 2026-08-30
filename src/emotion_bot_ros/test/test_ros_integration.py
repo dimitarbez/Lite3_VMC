@@ -31,6 +31,45 @@ class CoreIntegrationTest(unittest.TestCase):
         initial = loads_state(state_message.data)
         self.assertEqual(initial["emotion"], "neutral")
 
+        chat_pub = rospy.Publisher("/emotion_bot/chat/input", String, queue_size=10)
+        chat_events = []
+        chat_states = []
+        chat_sub = rospy.Subscriber(
+            "/emotion_bot/chat/events", String,
+            lambda message: chat_events.append(json.loads(message.data)), queue_size=100,
+        )
+        chat_state_sub = rospy.Subscriber(
+            "/emotion_bot/state", String,
+            lambda message: chat_states.append(loads_state(message.data)), queue_size=20,
+        )
+        deadline = time.monotonic() + 5.0
+        while (
+            (
+                chat_pub.get_num_connections() < 1
+                or chat_sub.get_num_connections() < 1
+                or chat_state_sub.get_num_connections() < 1
+            )
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.05)
+        self.assertGreaterEqual(chat_pub.get_num_connections(), 1)
+        self.assertGreaterEqual(chat_sub.get_num_connections(), 1)
+        chat_pub.publish(String(data=json.dumps({"turn_id": "ros-turn", "text": "event:joy"})))
+        deadline = time.monotonic() + 5.0
+        while (
+            not any(item["type"] == "completed" for item in chat_events)
+            or not any(item.get("turn_id") == "ros-turn" and item["source"] == "user" for item in chat_states)
+        ) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        user_state = [
+            item for item in chat_states
+            if item.get("turn_id") == "ros-turn" and item["source"] == "user"
+        ][0]
+        self.assertEqual(user_state["emotion"], "joy")
+        self.assertTrue(any(item["type"] == "accepted" for item in chat_events))
+        self.assertTrue(any(item["type"] == "delta" for item in chat_events))
+        self.assertTrue(any(item["type"] == "completed" for item in chat_events))
+
         input_pub = rospy.Publisher("/emotion_bot/input", String, queue_size=10)
         manual_pub = rospy.Publisher("/emotion_bot/manual_joy", Joy, queue_size=10)
         direct_pub = rospy.Publisher("/emotion_bot/expression_cmd", Twist, queue_size=10)
@@ -70,27 +109,27 @@ class CoreIntegrationTest(unittest.TestCase):
         # Inject a malformed/oversize internal command; every observed safe
         # command remains finite and bounded.
         oversize = Twist()
-        oversize.linear.x = 10.0
-        oversize.linear.y = -10.0
-        oversize.angular.z = 10.0
+        oversize.linear.z = 10.0
+        oversize.angular.x = -10.0
+        oversize.angular.y = 10.0
         for _ in range(5):
             direct_pub.publish(oversize)
             rospy.sleep(0.05)
         bounded = self.wait_for(
             "/emotion_bot/safe_cmd", Twist,
-            lambda msg: abs(msg.linear.x) > 0.0,
+            lambda msg: abs(msg.linear.z) > 0.0,
         )
-        self.assertLessEqual(abs(bounded.linear.x), 0.10)
-        self.assertLessEqual(abs(bounded.linear.y), 0.05)
-        self.assertLessEqual(abs(bounded.angular.z), 0.10)
-        self.assertEqual(bounded.linear.z, 0.0)
-        self.assertEqual(bounded.angular.x, 0.0)
-        self.assertEqual(bounded.angular.y, 0.0)
+        self.assertEqual(bounded.linear.x, 0.0)
+        self.assertEqual(bounded.linear.y, 0.0)
+        self.assertEqual(bounded.angular.z, 0.0)
+        self.assertLessEqual(abs(bounded.linear.z), 0.070)
+        self.assertLessEqual(abs(bounded.angular.x), 0.50)
+        self.assertLessEqual(abs(bounded.angular.y), 0.50)
 
         manual = Joy()
         manual.axes = [0.0] * 8
         manual.buttons = [0] * 11
-        manual.axes[4] = -0.4
+        manual.axes[6] = -0.4
         for _ in range(4):
             manual_pub.publish(manual)
             rospy.sleep(0.05)
@@ -101,9 +140,9 @@ class CoreIntegrationTest(unittest.TestCase):
         self.assertEqual(json.loads(status.data)["last_safety_action"], "manual_priority")
         joy = self.wait_for(
             "/emotion_bot/joy_out", Joy,
-            lambda msg: len(msg.axes) >= 5 and msg.axes[4] < 0.0,
+            lambda msg: len(msg.axes) >= 8 and msg.axes[6] < 0.0,
         )
-        self.assertGreaterEqual(joy.axes[4], -1.0)
+        self.assertGreaterEqual(joy.axes[6], -1.0)
 
         # Killing the mapper simulates loss of the selected emotion command.
         rosnode.kill_nodes(["/emotion_bot/expression_mapper"])

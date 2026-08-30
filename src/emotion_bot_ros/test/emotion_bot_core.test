@@ -2,6 +2,7 @@
   <group ns="emotion_bot">
     <rosparam command="load" file="$(find emotion_bot_ros)/config/default.yaml"/>
     <param name="runtime/emotion_bot_path" value="/workspaces/emotion-bot"/>
+    <node pkg="emotion_bot_ros" type="chat_adapter.py" name="chat_adapter" output="screen"/>
     <node pkg="emotion_bot_ros" type="emotion_adapter.py" name="adapter" output="screen"/>
     <node pkg="emotion_bot_ros" type="expression_mapper.py" name="expression_mapper" output="screen"/>
     <node pkg="emotion_bot_ros" type="safety_bridge.py" name="safety_bridge" output="screen"/>

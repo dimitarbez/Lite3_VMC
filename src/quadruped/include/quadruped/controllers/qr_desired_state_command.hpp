@@ -246,6 +246,18 @@ private:
      */
     float joycmdBodyHeight;
 
+    float nominalBodyHeight;
+
+    float joyCmdRoll;
+
+    float joyCmdPitch;
+
+    // One-shot, simulation-only in-place actions triggered exclusively by the
+    // emotion safety bridge.  They never select a trot gait or command x/y/yaw.
+    enum class ExpressionAction { NONE, HOP, STOMP };
+    ExpressionAction expressionAction = ExpressionAction::NONE;
+    double expressionActionStartedAt = -1.0;
+
     /**
      * @brief Linear velocity on Z Axis from joy control.
      */
@@ -383,6 +395,18 @@ private:
      * This member is currently not used
      */
     const float BODY_HEIGHT_MIN = 0.15f;
+
+    // Simulation expression envelope. Locomotion remains independently gated;
+    // these values only shape the four-contact JOY_STAND posture.
+    const float EMOTION_HEIGHT_OFFSET_MAX = 0.070f;
+    const float EMOTION_ROLL_MAX = 0.50f;
+    const float EMOTION_PITCH_MAX = 0.50f;
+    // Deliberately small simulator impulse: enough to read as a hop/stomp,
+    // but not enough to turn a four-foot stance reaction into a lurch.
+    const float EXPRESSION_ACTION_HEIGHT = 0.025f;
+    const float EXPRESSION_ACTION_CROUCH = 0.018f;
+    const float EXPRESSION_ACTION_UP_VELOCITY = 0.20f;
+    const float EXPRESSION_ACTION_DOWN_VELOCITY = -0.16f;
 
 };
 

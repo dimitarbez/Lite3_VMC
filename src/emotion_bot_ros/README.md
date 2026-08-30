@@ -1,97 +1,116 @@
 # emotion_bot_ros
 
-`emotion_bot_ros` is the simulation-only boundary between the real EmotionBot domain model and the DEEP Robotics Lite3 Gazebo controller. Emotional reasoning, mapping, and actuation are separate nodes. The adapter never publishes Joy, joint effort, motor data, or UDP.
+`emotion_bot_ros` is the simulation-only boundary between the sibling EmotionBot domain model, conversational backends, and the DEEP Robotics Lite3 Gazebo controller. Conversation, emotional reasoning, expression mapping, and actuation safety remain separate. Neither the chat node nor EmotionBot publishes Joy, joint effort, motor data, or UDP.
 
-## Runtime and licensing boundary
+## Runtime and source boundary
 
-The package imports the sibling checkout mounted read-only at `/workspaces/emotion-bot`; it does not vendor or duplicate EmotionBot code. The recorded base commit is `34e38b86a3fc0c2fec7a6b84d7e82eae64d989f0`. EmotionBot and this integration package retain the GPL-3.0-only boundary declared in their license metadata. Lite3 upstream source remains in its own workspace and retains its own notices.
+The package imports the read-only `/workspaces/emotion-bot` checkout at recorded commit `20c0c1361434bcf9ebaec4e8a5c9385e61c9c3e2`; it does not vendor or duplicate that GPL-3.0 code. The reusable API is `emotional_core.engine.EmotionEngine`, which owns state, personality, appraisal/update, memory, local response shaping, and seeded randomness without importing the interactive CLI, matplotlib, microphone, or startup key check.
 
-ROS Noetic supplies Python 3.8. EmotionBot’s complete pinned application requirements are newer, so the verified runtime uses its minimal headless core and deterministic appraisal backend. Optional Transformers imports and model creation occur only when `backend:=transformers` is explicitly requested; that backend is not installed, exercised, or supported by the offline baseline. OpenAI is also not imported or called by the adapter. Local responses use EmotionBot’s behavior and personality shaping.
-
-The reusable integration API is `emotional_core.engine.EmotionEngine`. It owns `EmotionState`, personality, appraisal/update, conversation memory, local response generation, behavior shaping, and optional seeded randomness without importing the CLI, matplotlib, microphone code, or API-key startup checks.
+ROS Noetic remains on Python 3.8. The default verified backend is deterministic and headless. Live chat uses a separate `lite3-openai-runtime:local` Python 3.12 image pinned to the official `openai==3.6.0` SDK. The loopback bridge owns the Responses API call; the secret never enters ROS or the mounted workspace.
 
 ## Nodes
 
 | Node | Responsibility |
 | --- | --- |
-| `/emotion_bot/adapter` | Own one EmotionEngine session, accept text/events, validate and latch state, publish local responses and state heartbeats. |
-| `/emotion_bot/expression_mapper` | Validate state and play the matching finite-duration Twist intention when sequence increases. A heartbeat refreshes freshness without restarting a pattern. |
-| `/emotion_bot/safety_bridge` | Clamp emotion intentions, arbitrate manual Joy, enforce enable/readiness/watchdogs, publish safe status, and convert to the simulator’s Joy axes. |
-| `/lite3_controller_loader` | One-shot controller-manager client that loads/starts the 12 effort controllers and joint-state controller without an interactive stdin spawner. |
-| `/lite3_sim_runner` | Wait for the model/controllers, supervise `example_lite3_sim`, remap its `/joy` input, and stop its child on shutdown. |
-| `emotion_chat.py` | Interactive ROS text client; no EmotionBot CLI automation. |
+| `/emotion_bot/chat_adapter` | Own bounded context and turn ordering; publish immediate acceptance, streamed deltas, retry/fallback, cancellation, and exactly one current-turn completion. |
+| `/emotion_bot/adapter` | Feed accepted user/current assistant events into one `EmotionEngine`; validate and latch contract 1.1 state with turn correlation. |
+| `/emotion_bot/expression_mapper` | Filter affect, gate category changes, blend/rate-limit the mapped expression, and return smoothly to neutral. |
+| `/emotion_bot/safety_bridge` | Clamp emotion/manual intentions, enforce enable/readiness/watchdogs, arbitrate manual priority, publish status, and generate the simulator Joy input. |
+| `/lite3_controller_loader` | Load/start 12 effort controllers plus joint-state controller without stdin. |
+| `/lite3_sim_runner` | Wait for readiness, supervise `example_lite3_sim`, remap its sole Joy input, and stop it on shutdown. |
+| `emotion_chat.py` | Interactive streaming client with turn-correlated response/state display. |
 | `emotion_demo.py` | Deterministic multi-emotion demo with guaranteed disable on exit. |
+
+The integrated safety bridge is a required roslaunch node. Its failure tears down the stack instead of allowing the simulation controller to persist with an old input.
 
 ## Topics and service
 
-| Name | Type | Producer | Meaning |
-| --- | --- | --- | --- |
-| `/emotion_bot/input` | `std_msgs/String` | user/client | Natural text or exact `event:<emotion>`/`emotion:<emotion>`. |
-| `/emotion_bot/state` | `std_msgs/String` | adapter | Latched, validated JSON state; heartbeat republishes the same sequence with a new timestamp. |
-| `/emotion_bot/response` | `std_msgs/String` | adapter | Offline response for the submitted input. |
-| `/emotion_bot/expression_cmd` | `geometry_msgs/Twist` | mapper | Finite behavior intention; only x, y, yaw are used. |
-| `/emotion_bot/safe_cmd` | `geometry_msgs/Twist` | safety bridge | Selected, clamped intention for inspection. This is not the simulator transport. |
-| `/emotion_bot/manual_joy` | `sensor_msgs/Joy` | keyboard/manual client | Manual input to arbitration; never publish the keyboard directly to the integrated `/joy` path. |
-| `/emotion_bot/joy_out` | `sensor_msgs/Joy` | safety bridge | Sole input remapped into the Lite3 simulation controller. |
-| `/emotion_bot/status` | `std_msgs/String` | safety bridge | Latched JSON with `motion_enabled`, `stale`, `backend`, `selected_source`, `last_safety_action`, `sim_ready`, and stamp. |
-| `/emotion_bot/sim_controller_ready` | `std_msgs/Bool` | Lite3 sim executable | Latched internal-controller readiness used by the integrated safety interlock. |
-| `/lite3_gazebo/joint_states` | `sensor_msgs/JointState` | Gazebo controller | Existing 12-joint simulation state. |
+| Name | Type | Meaning |
+| --- | --- | --- |
+| `/emotion_bot/chat/input` | `std_msgs/String` | Plain text or JSON `{"turn_id":"...","text":"..."}`. |
+| `/emotion_bot/chat/cancel` | `std_msgs/String` | Cancel the active turn; empty data means current turn. |
+| `/emotion_bot/chat/events` | `std_msgs/String` | JSON lifecycle/stream events for clients. |
+| `/emotion_bot/chat/response` | `std_msgs/String` | JSON final response correlated by turn ID/index. |
+| `/emotion_bot/conversation/events` | `std_msgs/String` | Semantic accepted/completed/cancel/error feed consumed by EmotionBot. |
+| `/emotion_bot/input` | `std_msgs/String` | Compatibility input for natural text or exact `event:<emotion>`. |
+| `/emotion_bot/state` | `std_msgs/String` | Latched validated JSON state; heartbeat keeps the sequence and turn ID. |
+| `/emotion_bot/response` | `std_msgs/String` | Compatibility local response for `/emotion_bot/input`. |
+| `/emotion_bot/expression_cmd` | `geometry_msgs/Twist` | Fluid expression intention; normal profiles use height (`linear.z`), roll (`angular.x`), and pitch (`angular.y`) while standing. |
+| `/emotion_bot/expression_action` | `std_msgs/String` | Optional one-shot mapper request: `hop` or `stomp`; it is rejected by the default planted-expression configuration and remains available only for supervised experiments. |
+| `/emotion_bot/safe_cmd` | `geometry_msgs/Twist` | Selected and clamped intention for inspection, not simulator transport. |
+| `/emotion_bot/manual_joy` | `sensor_msgs/Joy` | Manual arbitration input. |
+| `/emotion_bot/joy_out` | `sensor_msgs/Joy` | Sole Joy input remapped to the Lite3 simulation controller. |
+| `/emotion_bot/status` | `std_msgs/String` | Latched safety/arbitration status. |
+| `/emotion_bot/sim_controller_ready` | `std_msgs/Bool` | Latched internal-controller readiness. |
+| `/lite3_gazebo/joint_states` | `sensor_msgs/JointState` | Existing 12-joint Gazebo state. |
 
-`/emotion_bot/set_motion_enabled` is `std_srvs/SetBool`. True is rejected by the integrated launch until simulation readiness is true. False immediately zeros output and schedules a stand pulse when needed.
+`/emotion_bot/set_motion_enabled` is `std_srvs/SetBool`. True is rejected until simulation readiness in the integrated launch. False immediately zeros output and schedules stand when needed.
 
-## State contract 1.0
+## Conversation event contract 1.0
 
-The state payload is compact JSON. Example:
+Every event contains `schema_version`, floating-point `stamp`, non-empty `turn_id`, positive `turn_index`, and one of:
+
+- `accepted`: immediate user text acknowledgement;
+- `started`: backend selected;
+- `delta`: an assistant text fragment, published promptly;
+- `retrying`: bounded retry notice;
+- `offline_fallback`: deterministic backend selected after live failure;
+- `completed`: exactly one final assistant text for the current turn;
+- `cancelled`: explicit or superseding cancellation;
+- `error`: generic terminal error without provider/secret details.
+
+The coordinator retains at most 6 turns/6000 characters, accepts at most 2000 input characters, produces at most 6000 response characters, and limits the sidecar request to 300 output tokens. It waits up to 0.5 seconds for the accepted user's same-turn emotion before starting the backend. Starting a newer turn sets the old cancellation token before its acceptance event. The last accepted turn index is retained on the ROS parameter server so a chat-node restart remains monotonic within the running graph. The adapter's `TurnGate` ignores late, cancelled, duplicate, or out-of-order completion.
+
+## Emotion state contract 1.1
+
+Example compact JSON:
 
 ```json
-{"arousal":0.6,"backend":"deterministic","emotion":"joy","schema_version":"1.0","sequence":1,"source":"event","stamp":{"nsecs":938900000,"secs":1},"valence":0.7}
+{"arousal":0.6,"backend":"deterministic","emotion":"joy","schema_version":"1.1","sequence":1,"source":"user","stamp":{"nsecs":938900000,"secs":1},"turn_id":"turn-000001","valence":0.7}
 ```
 
-Validation requires a non-negative sequence, ROS `{secs,nsecs}` timestamp, non-empty backend/source, valence in `[-1,1]`, arousal in `[0,1]`, and exactly one of `neutral`, `joy`, `sadness`, `anger`, `fear`, `surprise`, `disgust`, `curiosity`, or `affection`. Malformed state is rejected and the mapper publishes zero.
+Validation requires a non-negative sequence, ROS timestamp, non-empty backend/source/turn ID, valence in `[-1,1]`, arousal in `[0,1]`, and exactly one of `neutral`, `joy`, `sadness`, `anger`, `fear`, `surprise`, `disgust`, `curiosity`, or `affection`. Malformed state forces a neutral mapper output.
 
-## Default finite mappings
+## Live OpenAI path
 
-All values are configurable under `/emotion_bot/mappings` in `config/default.yaml`.
+The sidecar binds `127.0.0.1:8765`. `/v1/stream` accepts only bounded JSON and emits NDJSON deltas/done. It calls `client.responses.create` using `gpt-5-mini`, `stream=true`, `store=false`, minimal reasoning, low verbosity, a 20-second timeout, and SDK retries disabled. The ROS coordinator retries once, then uses the deterministic backend. Cancellation closes the upstream stream when possible; a timeout bounds an unresponsive request. Errors crossing either boundary are generic.
 
-| Emotion | Pattern `(duration s: x, y, yaw)` |
-| --- | --- |
-| neutral | `0.5: 0, 0, 0` |
-| joy | `3.0: +0.06, 0, 0`; `1.0: 0, 0, +0.04` |
-| sadness | `2.0: -0.025, 0, 0` |
-| anger | `1.2: +0.04, 0, +0.08`; `1.2: +0.04, 0, -0.08` |
-| fear | `1.8: -0.04, 0, +0.05` |
-| surprise | `1.0: 0, +0.04, 0`; `1.0: 0, -0.04, 0` |
-| disgust | `2.0: 0, -0.03, -0.04` |
-| curiosity | `1.5: +0.02, 0, +0.04`; `1.5: +0.02, 0, -0.04` |
-| affection | `2.5: +0.03, +0.02, +0.025` |
+For persistent local use, put the credential in the workspace root `.env` as `OPENAI_API_KEY=...`; the file is Git-ignored and should remain mode `600`. The wrapper sources it automatically for `start-openai-bridge`. Docker passes only the variable name with `--env OPENAI_API_KEY` (no value in arguments) and starts the sidecar with `--rm`; `/health` exposes only booleans for key presence/test mode.
 
-A segment duration must be finite and in `(0,10]`. Completion yields zero; patterns do not loop.
+## Fluid mapping
+
+All nine expression profiles remain configurable under `/emotion_bot/mappings`. Each profile has an entrance `segments` list and a looping `idle_segments` list: a state change immediately interrupts/blends into the new entrance, then repeats the idle body language until another state, timeout, disable, or shutdown. Every emotion exposes `intensity`, `duration`, `speed`, `acceleration`, `cooldown`, `variation`, and `transition_blend` alongside those segment lists. `duration` and `speed` scale the entrance/cadence; `acceleration` scales mapper slew only; `cooldown` prevents a repeated state from restarting too rapidly; and deterministic `variation` prevents a held profile from freezing into a statue.
+
+The fixed-rate controller adds:
+
+- elapsed-time valence/arousal low-pass filters (`0.45`/`0.35` s);
+- immediate category interruption with smoothstep profile-specific transition blending (and a `0.35` s neutral return);
+- bounded same-category replay after the profile cooldown, so repeated emotional events read without rapid-trigger chatter;
+- continuous arousal intensity scaling above a theatrical `0.55` floor;
+- body-height slew limit `0.25 m/s` and roll/pitch slew limit `1.50 rad/s`;
+- optional x/y slew limit `0.18 m/s²` and yaw slew limit `0.30 rad/s` for supervised locomotion experiments.
+
+Segment values use a deliberately theatrical simulation posture envelope: body height is bounded to ±0.070 m and roll/pitch to ±0.50 rad; normal negative segments stop at -0.055 m to preserve crouch clearance. Neutral settles quietly to exact zero, joy anticipates then bounces/rocks, sadness lowers and bows, anger makes a planted stomp-like brace and tense sway, fear recoils into a trembling crouch, surprise recoils then springs into alertness, disgust leans away, curiosity tilts between sides, and affection sways warmly. Segment duration must be finite and in `(0,10]`. Segments may declare the optional simulation-only action `hop` or `stomp`; no other actions are valid. Default profiles intentionally do not use them because the upstream discrete actions accumulated planar drift during Gazebo validation.
+
+## Safety and manual arbitration
+
+Initial output and initial motion permission are zero/false. After the simulation controller reports ready, the integrated launch enters `JOY_STAND` once and waits four simulated seconds for the upstream stance transition to settle before motion can be enabled. Normal expressions then keep four feet planted, clamp body-height offset to ±0.070 m and roll/pitch to ±0.50 rad, and rate-limit them to 0.25 m/s and 1.50 rad/s. Optional `hop`/`stomp` actions are gated off by default because they were observed to accumulate planar drift; they never select a gait or publish x/y/yaw when explicitly enabled for a supervised experiment. Translational and yaw locomotion are forced to exact zero while `allow_locomotion` is false, preventing the upstream trot controller's accumulated drift and NaN-prone repeated gait transitions. Integrated simulation also monitors all 12 joint states, finite model pose, torso height, roll/pitch, and a 0.040 m planar-displacement limit from the enable point; a violation or a 0.5-second monitoring gap disables motion immediately and is reported in `/emotion_bot/status`.
+
+Manual posture axes are bounded by the same limits and manual activity has priority for 0.75 seconds. `run-emotion-keyboard` selects posture mode: w/s pitch, a/d roll, and q/e height. Locomotion axes and X are blocked by default. Setting `allow_locomotion: true` restores the former supervised B/X/directional path, including one-shot mode buttons, settling delay, bounded velocity, slew limits, and automatic stand timeout. Emotion/manual commands expire after 0.5 seconds and state expires after 1.0 second. Completion, stale state, disable, readiness loss, and upstream node failure converge to exact neutral posture and zero velocity. There is no real executable, UDP bridge, or hardware address in this package.
 
 ## Parameters
 
-`config/default.yaml` defines all runtime values below the `/emotion_bot` namespace:
+`config/default.yaml` is the source of truth for every topic/service and these groups:
 
-- `topics/*`: every topic listed above.
-- `services/set_motion_enabled`: enable/disable service name.
-- `runtime/emotion_bot_path`, `backend`, `personality`, `seed`, `randomness_enabled`, `heartbeat_rate`.
-- `mapper/publish_rate`, `state_timeout`.
-- `safety/motion_enabled`, `require_sim_ready`, `publish_rate`, `expression_timeout`, `manual_timeout`, `manual_priority_hold`, `mode_transition_delay` (1.5 s by default so stand completes before automatic locomotion).
-- `safety/limits/linear_x`, `linear_y`, `angular_z`.
-- `mappings/<emotion>/segments`: finite mapping values.
+- `runtime`: EmotionBot path/backend/personality/seed/randomness/heartbeat;
+- `chat`: backend/model/bridge endpoint, timeout, token/context/input/response bounds, retries, fallback;
+- `mapper`: publish rate, state timeout, affect filters, blend/neutral timing, dwell/hysteresis, slew rates;
+- `safety`: initial enable, readiness, publish/watchdog/priority/mode timing, final velocity limits;
+- `mappings`: all nine declarative segment lists.
 
-`core.launch` exposes arguments for checkout path, backend, personality, seed, and initial enable flag. `integrated_sim.launch` additionally exposes `gui`, `headless`, `world`, and `motion_enabled`, and forces `require_sim_ready=true`.
-
-## Safety and arbitration
-
-Initial output is zero and motion is disabled. Emotion commands are clamped to ±0.10 m/s x, ±0.05 m/s y, and ±0.10 rad/s yaw. NaN/Inf becomes zero. Unsupported Twist axes remain zero.
-
-The bridge converts x to Joy axis 4 using the simulator’s 0.2 scale, y to axis 3 using 0.1, and yaw to axis 0 using 0.2. It sends B/stand before X/locomotion for emotion motion. Manual input preserves only axes 0/3/4 and buttons 1/2/3/5, clamps axes to ±1, and takes priority for a bounded hold interval.
-
-Expired emotion/manual input, neutral/completed patterns, disable, readiness loss, mapper/adapter loss, and shutdown select zero and leave locomotion through the B/stand transition. Shutdown publishes zero Twist and a zero Joy carrying the stand button. Hardware is outside this package’s scope.
+`core.launch` exposes EmotionBot and chat backend/model arguments. `integrated_sim.launch` also exposes GUI/headless/world/motion and forces the simulation readiness interlock.
 
 ## Launch and tests
-
-From the repository root:
 
 ```bash
 make -C lite3-noetic run-emotion-sim
@@ -100,4 +119,4 @@ make -C lite3-noetic emotion-demo EMOTION_MOTION=true
 make -C lite3-noetic verify-emotion
 ```
 
-`test/test_unit.py` covers contracts, all mappings, bounds, clamping, timeouts, defaults, shutdown-equivalent disable, and deterministic behavior. `test/emotion_bot_core.test` covers headless ROS publication, latching, enable, limits, watchdog, manual priority, and adapter loss. `test_gazebo_e2e.py` launches the complete stack, confirms nodes/services/controllers/joints, measures torso displacement and standing height through Gazebo, verifies stop/watchdog/manual paths, captures teardown logs, and rejects real executable, hardware bridge, or motion-host UDP use.
+Unit tests cover state/event contracts, every profile's parameters, sustained idle loops, filtering/blending/cooldowns/rates, rapid interruption, neutral return, bounds, timeout/fallback/cancellation/late results, default disable, one-shot manual buttons, and safety arbitration. ROS integration covers deterministic streaming and turn-correlated state plus enable/limits/watchdogs/manual/adapter/mapper loss. The sidecar test crosses the real HTTP process boundary without a key. Gazebo E2E drives all nine profiles, measures each transition and idle movement, tests rapid/repeated changes, validates physical/manual motion and stops, checks standing height/teardown, and rejects real-hardware paths.
