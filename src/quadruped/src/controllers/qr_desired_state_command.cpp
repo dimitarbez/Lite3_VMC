@@ -373,7 +373,12 @@ void Quadruped::qrDesiredStateCommand::JoyCallback(const sensor_msgs::Joy::Const
         /* If Rb key is pressed when quadruped is standing by MPC,
          * quadruped will switch to position mode and can sit down and stand up with position mode.
          */
-        if (joy_msg->buttons[5] == 1) {
+        // emotion_bot_ros reserves button 5 for a one-shot stomp while the
+        // simulator is already in torque stance. Do not let that same pulse
+        // fall through to the upstream body-mode toggle below.
+        if (joy_msg->buttons[5] == 1 && !(
+                joyCtrlState == RC_MODE::JOY_STAND &&
+                expressionAction == ExpressionAction::STOMP)) {
             ROS_INFO("You have pressed the up/down button!!!!\n");
             if (movementMode == 0) {
                 if (bodyUp==0) {
@@ -474,6 +479,7 @@ void Quadruped::qrDesiredStateCommand::Update()
 
     float actionHeight = joycmdBodyHeight;
     float actionVz = 0.f;
+    float actionPitch = joyCmdPitch;
     if (joyCtrlState == RC_MODE::JOY_STAND && expressionAction != ExpressionAction::NONE) {
         const double elapsed = ros::Time::now().toSec() - expressionActionStartedAt;
         if (elapsed < 0.0) {
@@ -482,29 +488,45 @@ void Quadruped::qrDesiredStateCommand::Update()
             // Compress, then drive all four legs down together.  The short
             // recovery prevents the stance controller from holding a jump.
             if (elapsed < 0.12) {
-                actionHeight = nominalBodyHeight - EXPRESSION_ACTION_CROUCH;
-                actionVz = EXPRESSION_ACTION_DOWN_VELOCITY;
+                actionHeight = nominalBodyHeight - EXPRESSION_HOP_CROUCH;
+                actionVz = EXPRESSION_HOP_DOWN_VELOCITY;
             } else if (elapsed < 0.27) {
-                actionHeight = nominalBodyHeight + EXPRESSION_ACTION_HEIGHT;
-                actionVz = EXPRESSION_ACTION_UP_VELOCITY;
+                actionHeight = nominalBodyHeight + EXPRESSION_HOP_HEIGHT;
+                actionVz = EXPRESSION_HOP_UP_VELOCITY;
             } else if (elapsed < 0.50) {
-                actionHeight = nominalBodyHeight + 0.015f;
+                actionHeight = nominalBodyHeight + 0.020f;
                 actionVz = 0.f;
             } else {
                 expressionAction = ExpressionAction::NONE;
             }
         } else if (expressionAction == ExpressionAction::STOMP) {
-            // Raise to make the downward return visibly percussive while all
-            // four feet remain coordinated by the stance controller.
-            if (elapsed < 0.14) {
-                actionHeight = nominalBodyHeight + 0.018f;
-                actionVz = 0.14f;
-            } else if (elapsed < 0.30) {
-                actionHeight = nominalBodyHeight - EXPRESSION_ACTION_CROUCH;
-                actionVz = EXPRESSION_ACTION_DOWN_VELOCITY;
-            } else if (elapsed < 0.48) {
+            // Aggressive two-impact jump-stomp: compress and rock rearward,
+            // launch, drive the front pair down, then rebound into a shorter
+            // second strike.  Planar commands remain zero throughout.
+            if (elapsed < 0.16) {
+                actionHeight = nominalBodyHeight - 0.50f * EXPRESSION_STOMP_CROUCH;
+                actionVz = 0.35f * EXPRESSION_STOMP_DOWN_VELOCITY;
+                actionPitch = -0.18f;
+            } else if (elapsed < 0.34) {
+                actionHeight = nominalBodyHeight + EXPRESSION_STOMP_RAISE;
+                actionVz = 1.20f * EXPRESSION_STOMP_UP_VELOCITY;
+                actionPitch = -0.24f;
+            } else if (elapsed < 0.56) {
+                actionHeight = nominalBodyHeight - 0.90f * EXPRESSION_STOMP_CROUCH;
+                actionVz = 1.15f * EXPRESSION_STOMP_DOWN_VELOCITY;
+                actionPitch = 0.28f;
+            } else if (elapsed < 0.72) {
+                actionHeight = nominalBodyHeight + EXPRESSION_STOMP_REBOUND;
+                actionVz = EXPRESSION_STOMP_REBOUND_VELOCITY;
+                actionPitch = -0.12f;
+            } else if (elapsed < 0.90) {
+                actionHeight = nominalBodyHeight - 0.75f * EXPRESSION_STOMP_CROUCH;
+                actionVz = EXPRESSION_STOMP_DOWN_VELOCITY;
+                actionPitch = 0.20f;
+            } else if (elapsed < 1.20) {
                 actionHeight = nominalBodyHeight;
                 actionVz = 0.f;
+                actionPitch = 0.f;
             } else {
                 expressionAction = ExpressionAction::NONE;
             }
@@ -516,7 +538,7 @@ void Quadruped::qrDesiredStateCommand::Update()
     stateDes(2) = joyCtrlState == RC_MODE::JOY_STAND ? actionHeight : nominalBodyHeight;
 
     stateDes(3) = joyCtrlState == RC_MODE::JOY_STAND ? joyCmdRoll : 0.0;
-    stateDes(4) = joyCtrlState == RC_MODE::JOY_STAND ? joyCmdPitch : clip(filteredOmega[1]*dt, MIN_PITCH, MAX_PITCH);
+    stateDes(4) = joyCtrlState == RC_MODE::JOY_STAND ? actionPitch : clip(filteredOmega[1]*dt, MIN_PITCH, MAX_PITCH);
     stateDes(5) = dt * stateDes(11);
 
     stateDes(6) = clip(filteredVel[0], MIN_VELX, MAX_VELX);

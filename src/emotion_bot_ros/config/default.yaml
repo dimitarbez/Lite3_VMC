@@ -59,25 +59,26 @@ mapper:
 
 safety:
   motion_enabled: false
-  # The upstream trot controller can accumulate drift and produce NaNs during
-  # repeated mode changes. Emotional motion therefore stays in four-foot stance.
-  # Set true only for supervised experiments with the upstream locomotion gait.
+  # Explicitly enabled for the supervised Gazebo expression demo. The bridge
+  # still owns all gait changes, clamps all axes, and stops on watchdog/health
+  # faults; this is never a real-robot setting.
   allow_locomotion: false
-  # Upstream discrete hop/stomp modes can accumulate planar drift in Gazebo.
-  # Leave them available for supervised experiments but off for the safe,
-  # planted whole-body expression profiles below.
-  allow_dynamic_actions: false
+  allow_dynamic_actions: true
   monitor_sim_health: false
   minimum_body_height: 0.18
   maximum_body_height: 0.40
   maximum_tilt: 0.60
-  maximum_planar_displacement: 0.040
+  # A forceful Gazebo stomp/landing can make the contact model slip several
+  # centimetres. This remains a cumulative displacement stop, not locomotion.
+  maximum_planar_displacement: 0.080
   health_timeout: 0.50
   prepare_stance_on_ready: false
   stance_settle_time: 4.0
   require_sim_ready: false
   publish_rate: 20.0
-  expression_timeout: 0.50
+  # Allow a queued stance transition to complete before a one-shot action;
+  # the input Twist watchdog remains 0.50 s.
+  expression_timeout: 0.90
   manual_timeout: 0.50
   manual_priority_hold: 0.75
   mode_transition_delay: 0.35
@@ -88,13 +89,13 @@ safety:
     linear_x: 0.10
     linear_y: 0.05
     angular_z: 0.10
-    body_height: 0.070
-    roll: 0.50
-    pitch: 0.50
+    body_height: 0.035
+    roll: 0.20
+    pitch: 0.20
     linear_rate: 0.18
     yaw_rate: 0.30
-    body_height_rate: 0.25
-    attitude_rate: 1.50
+    body_height_rate: 0.12
+    attitude_rate: 0.70
 
 mappings:
   neutral:
@@ -120,12 +121,12 @@ mappings:
     variation: 0.12
     transition_blend: 0.13
     segments:
-      - {duration: 0.18, z: -0.018, roll: 0.0, pitch: 0.0}
-      - {duration: 0.34, z: 0.065, roll: 0.40, pitch: 0.0}
-      - {duration: 0.34, z: 0.050, roll: -0.40, pitch: 0.0}
+      - {duration: 0.45, x: 0.040, y: 0.016, yaw: 0.045, z: -0.010}
+      - {duration: 0.70, x: 0.050, y: -0.022, yaw: -0.055, z: 0.022}
+      - {duration: 0.70, x: 0.045, y: 0.022, yaw: 0.055, z: 0.018}
     idle_segments:
-      - {duration: 0.65, z: 0.030, roll: 0.30, pitch: 0.0}
-      - {duration: 0.65, z: 0.042, roll: -0.30, pitch: 0.0}
+      - {duration: 1.10, x: 0.045, y: 0.022, yaw: 0.055, z: 0.018}
+      - {duration: 1.10, x: 0.038, y: -0.022, yaw: -0.055, z: 0.024}
   sadness:
     intensity: 0.80
     duration: 1.35
@@ -149,15 +150,15 @@ mappings:
     variation: 0.10
     transition_blend: 0.11
     segments:
-      # The rapid brace-and-slam reads as stomp-like emphasis while preserving
-      # four planted feet and the no-planar-drift safety envelope.
-      - {duration: 0.18, z: 0.045, roll: 0.38, pitch: 0.0}
-      - {duration: 0.25, z: 0.055, roll: -0.48, pitch: 0.0}
-      - {duration: 0.32, z: -0.052, roll: 0.0, pitch: 0.0}
-      - {duration: 0.20, z: -0.022, roll: 0.0, pitch: 0.0}
+      # Reserve the complete raise, slam, and rebound for the one-shot action;
+      # the angry body sway begins only after the percussive motion completes.
+      - {duration: 1.58, z: 0.0, roll: 0.0, pitch: 0.0, action: stomp}
+      - {duration: 0.25, z: -0.018, roll: 0.08, pitch: 0.0}
+      - {duration: 0.32, z: -0.022, roll: -0.08, pitch: 0.0}
+      - {duration: 0.20, z: -0.014, roll: 0.0, pitch: 0.0}
     idle_segments:
-      - {duration: 0.52, z: -0.026, roll: 0.32, pitch: 0.0}
-      - {duration: 0.52, z: -0.030, roll: -0.32, pitch: 0.0}
+      - {duration: 0.52, z: -0.018, roll: 0.08, pitch: 0.0}
+      - {duration: 0.52, z: -0.020, roll: -0.08, pitch: 0.0}
   fear:
     intensity: 0.90
     duration: 1.10
@@ -184,12 +185,12 @@ mappings:
     variation: 0.08
     transition_blend: 0.09
     segments:
-      - {duration: 0.16, z: -0.018, roll: 0.0, pitch: 0.0}
-      - {duration: 0.28, z: 0.068, roll: 0.0, pitch: -0.14}
-      - {duration: 0.41, z: -0.020, roll: 0.0, pitch: -0.10}
+      - {duration: 0.16, z: -0.012, roll: 0.0, pitch: 0.0}
+      - {duration: 0.28, z: 0.0, roll: 0.0, pitch: 0.0, action: hop}
+      - {duration: 0.41, z: -0.014, roll: 0.0, pitch: -0.06}
     idle_segments:
-      - {duration: 0.70, z: 0.026, roll: 0.0, pitch: -0.13}
-      - {duration: 0.70, z: 0.018, roll: 0.08, pitch: -0.10}
+      - {duration: 0.70, z: 0.014, roll: 0.0, pitch: -0.06}
+      - {duration: 0.70, z: 0.010, roll: 0.04, pitch: -0.05}
   disgust:
     intensity: 0.92
     duration: 1.00

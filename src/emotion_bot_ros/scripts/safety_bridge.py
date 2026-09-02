@@ -8,6 +8,7 @@ import time
 
 import rospy
 from gazebo_msgs.msg import ModelStates
+from gazebo_msgs.srv import ApplyBodyWrench, ApplyBodyWrenchRequest
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import JointState, Joy
 from std_msgs.msg import Bool, String
@@ -33,6 +34,22 @@ class SafetyBridge:
         self.maximum_planar_displacement = float(
             rospy.get_param("/emotion_bot/safety/maximum_planar_displacement", 0.040)
         )
+        self.gazebo_stomp_impulse_enabled = bool(
+            rospy.get_param("/emotion_bot/safety/gazebo_stomp_impulse_enabled", False)
+        )
+        self.gazebo_stomp_force = float(
+            rospy.get_param("/emotion_bot/safety/gazebo_stomp_force", 160.0)
+        )
+        self.gazebo_stomp_duration = float(
+            rospy.get_param("/emotion_bot/safety/gazebo_stomp_duration", 0.08)
+        )
+        self.gazebo_stomp_delay = float(
+            rospy.get_param("/emotion_bot/safety/gazebo_stomp_delay", 0.12)
+        )
+        self.gazebo_wrench = (
+            rospy.ServiceProxy("/gazebo/apply_body_wrench", ApplyBodyWrench)
+            if self.gazebo_stomp_impulse_enabled else None
+        )
         self.health_timeout = float(rospy.get_param("/emotion_bot/safety/health_timeout", 0.50))
         self.model_health_ok = not self.monitor_sim_health
         self.joint_health_ok = not self.monitor_sim_health
@@ -47,6 +64,14 @@ class SafetyBridge:
         self.stance_settle_time = float(rospy.get_param("/emotion_bot/safety/stance_settle_time", 4.0))
         self.stance_ready_at = None
         self.stance_prepared = not self.prepare_stance_on_ready
+        requested_initial_motion = bool(
+            rospy.get_param("/emotion_bot/safety/motion_enabled", False)
+        )
+        # In the integrated simulator, a requested initial enable must wait for
+        # the controller-ready, model-health, and stable-stance interlocks.  It
+        # is consumed exactly once: a later fault or manual disable remains
+        # latched off until the service is deliberately called again.
+        self.auto_enable_pending = requested_initial_motion and self.prepare_stance_on_ready
         limits = Limits(
             x=float(rospy.get_param("/emotion_bot/safety/limits/linear_x", 0.10)),
             y=float(rospy.get_param("/emotion_bot/safety/limits/linear_y", 0.05)),
@@ -74,7 +99,7 @@ class SafetyBridge:
             ),
         )
         self.controller.set_enabled(
-            bool(rospy.get_param("/emotion_bot/safety/motion_enabled", False)),
+            requested_initial_motion and not self.auto_enable_pending,
             rospy.Time.now().to_sec(),
         )
         topics = rospy.get_param("/emotion_bot/topics")
@@ -147,6 +172,10 @@ class SafetyBridge:
         self.health_fault = "" if self.health_ok else (fault or self.health_fault or "sim_health_unavailable")
         if not self.health_ok:
             self.controller.set_enabled(False, rospy.Time.now().to_sec())
+            # A displacement fault is measured from the enable-time anchor.
+            # Once motion is disabled, discard that anchor so healthy stationary
+            # model updates can recover and require a deliberate re-enable.
+            self.motion_anchor = None
             if self.prepare_stance_on_ready:
                 self.stance_prepared = False
                 self.stance_ready_at = None
@@ -226,6 +255,7 @@ class SafetyBridge:
                     success=False,
                     message="Stable expression stance is still settling; motion remains disabled",
                 )
+            self.auto_enable_pending = False
             self.controller.set_enabled(request.data, rospy.Time.now().to_sec())
             self.motion_anchor = None
         action = "enabled" if request.data else "disabled and zeroed"
@@ -250,6 +280,21 @@ class SafetyBridge:
         message.angular.z = value.yaw
         return message
 
+    def apply_gazebo_stomp_impulse(self):
+        """Add a calibrated simulation-only flight impulse to a stomp."""
+        request = ApplyBodyWrenchRequest()
+        request.body_name = "lite3_gazebo::TORSO"
+        request.reference_frame = "world"
+        request.wrench.force.z = self.gazebo_stomp_force
+        request.start_time = rospy.Time.now() + rospy.Duration(self.gazebo_stomp_delay)
+        request.duration = rospy.Duration(self.gazebo_stomp_duration)
+        try:
+            response = self.gazebo_wrench(request)
+            if not response.success:
+                rospy.logwarn("Gazebo stomp impulse rejected: %s", response.status_message)
+        except rospy.ServiceException as exc:
+            rospy.logwarn("Gazebo stomp impulse failed: %s", exc)
+
     def on_timer(self, _event):
         with self.lock:
             if self.monitor_sim_health:
@@ -270,9 +315,21 @@ class SafetyBridge:
                 and self.health_ok
             ):
                 self.stance_prepared = True
+            if (
+                self.auto_enable_pending
+                and self.sim_ready
+                and self.health_ok
+                and self.stance_prepared
+            ):
+                self.controller.set_enabled(True, rospy.Time.now().to_sec())
+                self.motion_anchor = None
+                self.auto_enable_pending = False
+                rospy.loginfo("Simulation motion enabled after readiness and stance checks")
             decision = self.controller.step(rospy.Time.now().to_sec())
             enabled = self.controller.motion_enabled
         self.joy_pub.publish(self.joy_message(decision.joy))
+        if self.gazebo_stomp_impulse_enabled and decision.action == "bounded_emotion_stomp":
+            self.apply_gazebo_stomp_impulse()
         self.safe_pub.publish(self.twist_message(decision.twist))
         status = {
             "stamp": rospy.Time.now().to_sec(),
@@ -287,6 +344,7 @@ class SafetyBridge:
             "locomotion_allowed": self.controller.allow_locomotion,
             "dynamic_actions_allowed": self.controller.allow_dynamic_actions,
             "stance_prepared": self.stance_prepared,
+            "auto_enable_pending": self.auto_enable_pending,
         }
         self.status_pub.publish(String(data=json.dumps(status, sort_keys=True)))
 
@@ -302,7 +360,7 @@ class SafetyBridge:
 def main():
     rospy.init_node("safety_bridge")
     SafetyBridge()
-    rospy.loginfo("Emotion safety bridge ready; motion is disabled by default")
+    rospy.loginfo("Emotion safety bridge ready; motion permission follows the selected launch profile")
     rospy.spin()
 
 

@@ -309,6 +309,28 @@ class SafetyController:
         source = "none"
         twist = TwistValue()
         joy = JoyValue()
+
+        # A discrete hop/stomp begins from the four-contact Lite3 stance.  It
+        # must never share a tick with gait velocity or a
+        # theatrical roll/pitch command: that combination can leave the
+        # support polygon while the controller changes modes.  Give the action
+        # priority, bring the robot to torque stance with zero axes, then send
+        # its one-shot button pulse on a later tick.
+        dynamic_action = self._pending_dynamic_action(now, source, expression_stale)
+        if dynamic_action != "none":
+            mode_command = self._start_stance_if_needed(now)
+            if mode_command is not None:
+                self._force_output_zero(now)
+                return SafetyDecision(
+                    TwistValue(), mode_command, "emotion_action", expression_stale, self.last_action
+                )
+            action_joy = self._consume_dynamic_action()
+            self._force_output_zero(now)
+            self.last_action = "bounded_emotion_%s" % dynamic_action
+            return SafetyDecision(
+                TwistValue(), action_joy, "emotion_action", expression_stale, self.last_action
+            )
+
         if manual_active:
             joy = JoyValue(list(self.manual.axes), list(self.manual.buttons))
             # Keyboard mode buttons are edge-like commands.  Replaying a held
@@ -352,30 +374,13 @@ class SafetyController:
                 return SafetyDecision(TwistValue(), JoyValue(), source, expression_stale, self.last_action)
             limited = self._slew_output(twist, now)
             joy = self._twist_to_joy(limited)
-            dynamic_action = self._pending_dynamic_action(now, source, expression_stale)
-            if dynamic_action != "none":
-                action_joy = self._consume_dynamic_action()
-                joy.buttons = action_joy.buttons
-                self.last_action = "bounded_emotion_%s" % dynamic_action
-            else:
-                self.last_action = "manual_priority" if source == "manual" else "bounded_emotion_command"
+            self.last_action = "manual_priority" if source == "manual" else "bounded_emotion_command"
             return SafetyDecision(limited, joy, source, expression_stale, self.last_action)
 
         # Mapper Twist and String publications travel on independent ROS
         # connections.  The one-shot action can therefore arrive one control
         # tick before its blended posture becomes non-zero.  Keep it behind the
         # same enabled/fresh watchdog, but do not discard that legitimate pulse.
-        dynamic_action = self._pending_dynamic_action(now, source, expression_stale)
-        if dynamic_action != "none":
-            mode_command = self._start_stance_if_needed(now)
-            if mode_command is not None:
-                self._force_output_zero(now)
-                return SafetyDecision(TwistValue(), mode_command, "emotion_action", expression_stale, self.last_action)
-            action_joy = self._consume_dynamic_action()
-            self._force_output_zero(now)
-            self.last_action = "bounded_emotion_%s" % dynamic_action
-            return SafetyDecision(TwistValue(), action_joy, "emotion_action", expression_stale, self.last_action)
-
         limited = self._slew_output(TwistValue(), now)
         if not limited.is_zero():
             self.last_action = "watchdog_ramp_zero" if expression_stale else "expression_complete_ramp_zero"

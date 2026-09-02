@@ -401,12 +401,19 @@ private:
     const float EMOTION_HEIGHT_OFFSET_MAX = 0.070f;
     const float EMOTION_ROLL_MAX = 0.50f;
     const float EMOTION_PITCH_MAX = 0.50f;
-    // Deliberately small simulator impulse: enough to read as a hop/stomp,
-    // but not enough to turn a four-foot stance reaction into a lurch.
-    const float EXPRESSION_ACTION_HEIGHT = 0.025f;
-    const float EXPRESSION_ACTION_CROUCH = 0.018f;
-    const float EXPRESSION_ACTION_UP_VELOCITY = 0.20f;
-    const float EXPRESSION_ACTION_DOWN_VELOCITY = -0.16f;
+    // Gazebo-only theatrical actions. Locomotion stays disabled: these values
+    // produce a pronounced vertical reaction while the stance controller owns
+    // all four legs. They are never forwarded to the hardware command path.
+    const float EXPRESSION_HOP_HEIGHT = 0.045f;
+    const float EXPRESSION_HOP_CROUCH = 0.028f;
+    const float EXPRESSION_HOP_UP_VELOCITY = 0.32f;
+    const float EXPRESSION_HOP_DOWN_VELOCITY = -0.25f;
+    const float EXPRESSION_STOMP_RAISE = 0.060f;
+    const float EXPRESSION_STOMP_CROUCH = 0.050f;
+    const float EXPRESSION_STOMP_UP_VELOCITY = 0.40f;
+    const float EXPRESSION_STOMP_DOWN_VELOCITY = -0.60f;
+    const float EXPRESSION_STOMP_REBOUND = 0.030f;
+    const float EXPRESSION_STOMP_REBOUND_VELOCITY = 0.34f;
 
 };
 

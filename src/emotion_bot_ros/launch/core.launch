@@ -4,6 +4,7 @@
   <arg name="personality" default="balanced"/>
   <arg name="seed" default="7"/>
   <arg name="motion_enabled" default="false"/>
+  <arg name="allow_locomotion" default="false"/>
   <arg name="chat_backend" default="deterministic"/>
   <arg name="chat_model" default="gpt-5-mini"/>
 
@@ -14,6 +15,7 @@
     <param name="runtime/personality" value="$(arg personality)"/>
     <param name="runtime/seed" value="$(arg seed)"/>
     <param name="safety/motion_enabled" value="$(arg motion_enabled)"/>
+    <param name="safety/allow_locomotion" value="$(arg allow_locomotion)"/>
     <param name="chat/backend" value="$(arg chat_backend)"/>
     <param name="chat/model" value="$(arg chat_model)"/>
 
