@@ -45,6 +45,7 @@ qrWbcLocomotionController<T>::qrWbcLocomotionController(FloatingBaseModel<T> &mo
 
     taskBodyOri = new qrTaskBodyOrientation<T>(&fbModel);
     taskBodyPos = new qrTaskBodyPosition<T>(&fbModel);
+    const bool simulation = controlFSMData->quadruped->isSim;
 
     footContact[0] = new qrSingleContact<T>(&fbModel, Quadruped::linkID::FR);
     footContact[1] = new qrSingleContact<T>(&fbModel, Quadruped::linkID::FL);
@@ -59,12 +60,12 @@ qrWbcLocomotionController<T>::qrWbcLocomotionController(FloatingBaseModel<T> &mo
     for (size_t i = 0; i < 3; ++i) {
         // ((qrTaskBodyPosition<T> *)taskBodyPos)->Kp[i] = 280.;
         // ((qrTaskBodyPosition<T> *)taskBodyPos)->Kd[i] = 20.;
-        ((qrTaskBodyPosition<T> *)taskBodyPos)->Kp[i] = 100.;
-        ((qrTaskBodyPosition<T> *)taskBodyPos)->Kd[i] = 10.;
+        ((qrTaskBodyPosition<T> *)taskBodyPos)->Kp[i] = simulation ? 130. : 100.;
+        ((qrTaskBodyPosition<T> *)taskBodyPos)->Kd[i] = simulation ? 14. : 10.;
 
         // ((qrTaskBodyOrientation<T> *)taskBodyOri)->Kp[i] = 120.;
-        ((qrTaskBodyOrientation<T> *)taskBodyOri)->Kp[i] = 100.;
-        ((qrTaskBodyOrientation<T> *)taskBodyOri)->Kd[i] = 10.;
+        ((qrTaskBodyOrientation<T> *)taskBodyOri)->Kp[i] = simulation ? 130. : 100.;
+        ((qrTaskBodyOrientation<T> *)taskBodyOri)->Kd[i] = simulation ? 14. : 10.;
 
         for (size_t j(0); j < NumLeg; ++j) {
             ((qrTaskLinkPosition<T> *)taskFootPos[j])->Kp[i] = 500;

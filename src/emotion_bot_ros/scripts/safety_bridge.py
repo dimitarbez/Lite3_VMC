@@ -7,8 +7,8 @@ import threading
 import time
 
 import rospy
-from gazebo_msgs.msg import ModelStates
-from gazebo_msgs.srv import ApplyBodyWrench, ApplyBodyWrenchRequest
+from gazebo_msgs.msg import ModelState, ModelStates
+from gazebo_msgs.srv import SetModelState
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import JointState, Joy
 from std_msgs.msg import Bool, String
@@ -16,7 +16,7 @@ from std_srvs.srv import SetBool, SetBoolResponse
 
 from emotion_bot_ros.contract import loads_state
 from emotion_bot_ros.mapping import TwistValue
-from emotion_bot_ros.safety import Limits, SafetyController
+from emotion_bot_ros.safety import Limits, SafetyController, home_return_target
 
 
 class SafetyBridge:
@@ -28,28 +28,29 @@ class SafetyBridge:
         self.monitor_sim_health = bool(
             rospy.get_param("/emotion_bot/safety/monitor_sim_health", self.require_sim_ready)
         )
-        self.minimum_body_height = float(rospy.get_param("/emotion_bot/safety/minimum_body_height", 0.18))
-        self.maximum_body_height = float(rospy.get_param("/emotion_bot/safety/maximum_body_height", 0.40))
-        self.maximum_tilt = float(rospy.get_param("/emotion_bot/safety/maximum_tilt", 0.60))
+        self.minimum_body_height = float(rospy.get_param("/emotion_bot/safety/minimum_body_height", 0.10))
+        self.maximum_body_height = float(rospy.get_param("/emotion_bot/safety/maximum_body_height", 0.50))
+        self.maximum_tilt = float(rospy.get_param("/emotion_bot/safety/maximum_tilt", 1.20))
         self.maximum_planar_displacement = float(
             rospy.get_param("/emotion_bot/safety/maximum_planar_displacement", 0.040)
         )
-        self.gazebo_stomp_impulse_enabled = bool(
-            rospy.get_param("/emotion_bot/safety/gazebo_stomp_impulse_enabled", False)
+        self.home_return_enabled = bool(
+            rospy.get_param("/emotion_bot/safety/home_return/enabled", True)
         )
-        self.gazebo_stomp_force = float(
-            rospy.get_param("/emotion_bot/safety/gazebo_stomp_force", 160.0)
+        self.home_return_radius = float(
+            rospy.get_param("/emotion_bot/safety/home_return/trigger_radius", 0.10)
         )
-        self.gazebo_stomp_duration = float(
-            rospy.get_param("/emotion_bot/safety/gazebo_stomp_duration", 0.08)
+        self.home_resume_radius = float(
+            rospy.get_param("/emotion_bot/safety/home_return/resume_radius", 0.035)
         )
-        self.gazebo_stomp_delay = float(
-            rospy.get_param("/emotion_bot/safety/gazebo_stomp_delay", 0.12)
+        self.home_maximum_step = float(
+            rospy.get_param("/emotion_bot/safety/home_return/maximum_step", 0.012)
         )
-        self.gazebo_wrench = (
-            rospy.ServiceProxy("/gazebo/apply_body_wrench", ApplyBodyWrench)
-            if self.gazebo_stomp_impulse_enabled else None
-        )
+        self.home_return_active = False
+        self.home_cancel_pending = False
+        self.model_planar_pose = None
+        self.model_pose = None
+        self.home_distance = 0.0
         self.health_timeout = float(rospy.get_param("/emotion_bot/safety/health_timeout", 0.50))
         self.model_health_ok = not self.monitor_sim_health
         self.joint_health_ok = not self.monitor_sim_health
@@ -76,9 +77,9 @@ class SafetyBridge:
             x=float(rospy.get_param("/emotion_bot/safety/limits/linear_x", 0.10)),
             y=float(rospy.get_param("/emotion_bot/safety/limits/linear_y", 0.05)),
             yaw=float(rospy.get_param("/emotion_bot/safety/limits/angular_z", 0.10)),
-            z=float(rospy.get_param("/emotion_bot/safety/limits/body_height", 0.070)),
-            roll=float(rospy.get_param("/emotion_bot/safety/limits/roll", 0.50)),
-            pitch=float(rospy.get_param("/emotion_bot/safety/limits/pitch", 0.50)),
+            z=float(rospy.get_param("/emotion_bot/safety/limits/body_height", 0.100)),
+            roll=float(rospy.get_param("/emotion_bot/safety/limits/roll", 0.625)),
+            pitch=float(rospy.get_param("/emotion_bot/safety/limits/pitch", 0.625)),
         )
         self.controller = SafetyController(
             limits=limits,
@@ -86,16 +87,25 @@ class SafetyBridge:
             manual_timeout=float(rospy.get_param("/emotion_bot/safety/manual_timeout", 0.5)),
             manual_priority_hold=float(rospy.get_param("/emotion_bot/safety/manual_priority_hold", 0.75)),
             mode_transition_delay=float(rospy.get_param("/emotion_bot/safety/mode_transition_delay", 0.35)),
+            gait_transition_guard=float(
+                rospy.get_param("/emotion_bot/safety/gait_transition_guard", 0.60)
+            ),
             minimum_locomotion_time=float(rospy.get_param("/emotion_bot/safety/minimum_locomotion_time", 2.0)),
             manual_locomotion_timeout=float(rospy.get_param("/emotion_bot/safety/manual_locomotion_timeout", 4.0)),
             locomotion_command_delay=float(rospy.get_param("/emotion_bot/safety/locomotion_command_delay", 1.1)),
             max_linear_rate=float(rospy.get_param("/emotion_bot/safety/limits/linear_rate", 0.18)),
             max_yaw_rate=float(rospy.get_param("/emotion_bot/safety/limits/yaw_rate", 0.30)),
-            max_height_rate=float(rospy.get_param("/emotion_bot/safety/limits/body_height_rate", 0.25)),
-            max_attitude_rate=float(rospy.get_param("/emotion_bot/safety/limits/attitude_rate", 1.50)),
+            max_height_rate=float(rospy.get_param("/emotion_bot/safety/limits/body_height_rate", 0.75)),
+            max_attitude_rate=float(rospy.get_param("/emotion_bot/safety/limits/attitude_rate", 5.00)),
             allow_locomotion=bool(rospy.get_param("/emotion_bot/safety/allow_locomotion", False)),
             allow_dynamic_actions=bool(
                 rospy.get_param("/emotion_bot/safety/allow_dynamic_actions", True)
+            ),
+            action_queue_timeout=float(
+                rospy.get_param("/emotion_bot/safety/action_queue_timeout", 4.0)
+            ),
+            locomotion_zero_hold=float(
+                rospy.get_param("/emotion_bot/safety/locomotion_zero_hold", 0.25)
             ),
         )
         self.controller.set_enabled(
@@ -122,6 +132,9 @@ class SafetyBridge:
             SetBool,
             self.on_enable,
         )
+        self.set_model_state = rospy.ServiceProxy(
+            "/gazebo/set_model_state", SetModelState
+        )
         rate = float(rospy.get_param("/emotion_bot/safety/publish_rate", 20.0))
         self.timer = rospy.Timer(rospy.Duration(1.0 / rate), self.on_timer)
         rospy.on_shutdown(self.shutdown)
@@ -141,8 +154,42 @@ class SafetyBridge:
             )
 
     def on_expression_action(self, message):
+        raw = message.data.strip()
+        kind = "start"
+        generation = None
+        occurrence = "legacy"
+        action = raw
+        if raw not in ("hop", "stomp"):
+            try:
+                command = json.loads(raw)
+                if not isinstance(command, dict) or command.get("schema_version") != "1.0":
+                    raise ValueError("unsupported action command schema")
+                kind = command.get("kind")
+                if kind not in ("start", "cancel"):
+                    raise ValueError("invalid action command kind")
+                generation = command.get("generation")
+                if isinstance(generation, bool) or not isinstance(generation, int) or generation < 0:
+                    raise ValueError("invalid action generation")
+                action = command.get("action", "none")
+                occurrence = command.get(
+                    "occurrence_id", command.get("occurrence", "unspecified")
+                )
+                if kind == "start" and (
+                    action not in ("hop", "stomp")
+                    or not isinstance(command.get("emotion"), str)
+                ):
+                    raise ValueError("invalid action start command")
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                rospy.logwarn("Malformed expression action rejected: %s", exc)
+                return
         with self.lock:
-            self.controller.update_expression_action(message.data, rospy.Time.now().to_sec())
+            self.controller.update_expression_action(
+                action,
+                rospy.Time.now().to_sec(),
+                kind=kind,
+                generation=generation,
+                occurrence=str(occurrence),
+            )
 
     def on_manual(self, message):
         with self.lock:
@@ -176,6 +223,8 @@ class SafetyBridge:
             # Once motion is disabled, discard that anchor so healthy stationary
             # model updates can recover and require a deliberate re-enable.
             self.motion_anchor = None
+            self.home_return_active = False
+            self.home_cancel_pending = False
             if self.prepare_stance_on_ready:
                 self.stance_prepared = False
                 self.stance_ready_at = None
@@ -210,6 +259,9 @@ class SafetyBridge:
                 raise ValueError("body_height_out_of_range")
             if max(abs(roll), abs(pitch)) > self.maximum_tilt:
                 raise ValueError("body_tilt_out_of_range")
+            # Planar displacement is a fault only for the planted expression
+            # profile. The roaming profile instead uses this as a hard outer
+            # boundary and actively returns at the smaller soft radius.
             if self.motion_anchor is not None:
                 planar_displacement = math.hypot(
                     pose.position.x - self.motion_anchor[0],
@@ -224,8 +276,45 @@ class SafetyBridge:
             return
         with self.lock:
             self.model_health_ok = True
+            yaw = math.atan2(
+                2.0 * (q.w * q.z + q.x * q.y),
+                1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+            )
+            self.model_planar_pose = (pose.position.x, pose.position.y, yaw)
+            self.model_pose = (
+                pose.position.x,
+                pose.position.y,
+                pose.position.z,
+                q.x,
+                q.y,
+                q.z,
+                q.w,
+            )
             if self.controller.motion_enabled and self.motion_anchor is None:
                 self.motion_anchor = (pose.position.x, pose.position.y)
+            if self.motion_anchor is not None:
+                self.home_distance = math.hypot(
+                    pose.position.x - self.motion_anchor[0],
+                    pose.position.y - self.motion_anchor[1],
+                )
+                can_return = (
+                    self.home_return_enabled
+                    and self.controller.motion_enabled
+                )
+                if can_return and not self.home_return_active and self.home_distance >= self.home_return_radius:
+                    self.home_return_active = True
+                    self.home_cancel_pending = True
+                    self.controller.hold_stance_for_recenter(rospy.Time.now().to_sec())
+                    rospy.loginfo(
+                        "Emotion roaming boundary reached at %.3f m; returning to center",
+                        self.home_distance,
+                    )
+                elif self.home_return_active and self.home_distance <= self.home_resume_radius:
+                    self.home_return_active = False
+                    rospy.loginfo(
+                        "Emotion robot returned to center at %.3f m; resuming expression",
+                        self.home_distance,
+                    )
             self._update_health_locked()
 
     def on_joint_states(self, message):
@@ -258,6 +347,8 @@ class SafetyBridge:
             self.auto_enable_pending = False
             self.controller.set_enabled(request.data, rospy.Time.now().to_sec())
             self.motion_anchor = None
+            self.home_return_active = False
+            self.home_cancel_pending = False
         action = "enabled" if request.data else "disabled and zeroed"
         return SetBoolResponse(success=True, message="Simulation motion %s" % action)
 
@@ -280,22 +371,8 @@ class SafetyBridge:
         message.angular.z = value.yaw
         return message
 
-    def apply_gazebo_stomp_impulse(self):
-        """Add a calibrated simulation-only flight impulse to a stomp."""
-        request = ApplyBodyWrenchRequest()
-        request.body_name = "lite3_gazebo::TORSO"
-        request.reference_frame = "world"
-        request.wrench.force.z = self.gazebo_stomp_force
-        request.start_time = rospy.Time.now() + rospy.Duration(self.gazebo_stomp_delay)
-        request.duration = rospy.Duration(self.gazebo_stomp_duration)
-        try:
-            response = self.gazebo_wrench(request)
-            if not response.success:
-                rospy.logwarn("Gazebo stomp impulse rejected: %s", response.status_message)
-        except rospy.ServiceException as exc:
-            rospy.logwarn("Gazebo stomp impulse failed: %s", exc)
-
     def on_timer(self, _event):
+        recenter_state = None
         with self.lock:
             if self.monitor_sim_health:
                 now_wall = time.monotonic()
@@ -325,12 +402,50 @@ class SafetyBridge:
                 self.motion_anchor = None
                 self.auto_enable_pending = False
                 rospy.loginfo("Simulation motion enabled after readiness and stance checks")
-            decision = self.controller.step(rospy.Time.now().to_sec())
+            now = rospy.Time.now().to_sec()
+            if (
+                self.home_return_active
+                and self.motion_anchor is not None
+                and self.model_planar_pose is not None
+            ):
+                self.controller.expression_actions.clear()
+                self.controller.update_expression(TwistValue(), now)
+                target_x, target_y = home_return_target(
+                    self.motion_anchor[0],
+                    self.motion_anchor[1],
+                    self.model_planar_pose[0],
+                    self.model_planar_pose[1],
+                    self.home_maximum_step,
+                )
+                if self.model_pose is not None:
+                    recenter_state = ModelState()
+                    recenter_state.model_name = "lite3_gazebo"
+                    recenter_state.reference_frame = "world"
+                    recenter_state.pose.position.x = target_x
+                    recenter_state.pose.position.y = target_y
+                    recenter_state.pose.position.z = self.model_pose[2]
+                    recenter_state.pose.orientation.x = self.model_pose[3]
+                    recenter_state.pose.orientation.y = self.model_pose[4]
+                    recenter_state.pose.orientation.z = self.model_pose[5]
+                    recenter_state.pose.orientation.w = self.model_pose[6]
+            decision = self.controller.step(now)
+            if self.home_return_active:
+                decision.selected_source = "home_return"
+                decision.action = "returning_to_expression_center"
+            if self.home_cancel_pending:
+                # Hold four-foot stance while the bounded simulator restoring
+                # force acts. Cancellation alone only stops a hop or stomp.
+                decision.joy.buttons[1] = 1
+                decision.joy.buttons[6] = 1
+                self.home_cancel_pending = False
             enabled = self.controller.motion_enabled
         self.joy_pub.publish(self.joy_message(decision.joy))
-        if self.gazebo_stomp_impulse_enabled and decision.action == "bounded_emotion_stomp":
-            self.apply_gazebo_stomp_impulse()
         self.safe_pub.publish(self.twist_message(decision.twist))
+        if recenter_state is not None:
+            try:
+                self.set_model_state(recenter_state)
+            except rospy.ServiceException as exc:
+                rospy.logwarn_throttle(2.0, "Gazebo recenter service unavailable: %s", exc)
         status = {
             "stamp": rospy.Time.now().to_sec(),
             "motion_enabled": enabled,
@@ -345,6 +460,8 @@ class SafetyBridge:
             "dynamic_actions_allowed": self.controller.allow_dynamic_actions,
             "stance_prepared": self.stance_prepared,
             "auto_enable_pending": self.auto_enable_pending,
+            "home_return_active": self.home_return_active,
+            "home_distance": self.home_distance,
         }
         self.status_pub.publish(String(data=json.dumps(status, sort_keys=True)))
 
@@ -353,6 +470,7 @@ class SafetyBridge:
         zero_joy.axes = [0.0] * 8
         zero_joy.buttons = [0] * 11
         zero_joy.buttons[1] = 1
+        zero_joy.buttons[6] = 1
         self.safe_pub.publish(Twist())
         self.joy_pub.publish(zero_joy)
 

@@ -4,7 +4,7 @@
   <arg name="personality" default="balanced"/>
   <arg name="seed" default="7"/>
   <arg name="motion_enabled" default="false"/>
-  <arg name="allow_locomotion" default="false"/>
+  <arg name="allow_locomotion" default="true"/>
   <arg name="chat_backend" default="deterministic"/>
   <arg name="chat_model" default="gpt-5-mini"/>
 

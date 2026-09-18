@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Convert validated emotion states into finite-duration Twist patterns."""
+"""Convert validated emotion states into smooth, looping expression patterns."""
 
+import json
 import threading
 
 import rospy
@@ -33,9 +34,13 @@ class ExpressionMapper:
             arousal_tau=float(fluid["arousal_tau"]),
             blend_time=float(fluid["blend_time"]),
             neutral_return_time=float(fluid["neutral_return_time"]),
+            neutral_hold_time=float(fluid.get("neutral_hold_time", 0.0)),
             min_dwell=float(fluid["min_dwell"]),
             hysteresis=float(fluid["hysteresis"]),
             min_intensity=float(fluid["min_intensity"]),
+            amplitude_scale=float(fluid.get("amplitude_scale", 1.0)),
+            idle_amplitude_scale=float(fluid.get("idle_amplitude_scale", 1.0)),
+            idle_time_scale=float(fluid.get("idle_time_scale", 1.0)),
             max_linear_rate=float(fluid["max_linear_rate"]),
             max_yaw_rate=float(fluid["max_yaw_rate"]),
         )
@@ -77,10 +82,20 @@ class ExpressionMapper:
             value = self.controller.command(now, stale=stale)
             action = self.controller.consume_action(now, stale=stale)
         self.publisher.publish(to_message(value))
-        if action != "none":
-            self.action_publisher.publish(String(data=action))
+        if action is not None:
+            self.action_publisher.publish(
+                String(data=json.dumps(action, sort_keys=True, separators=(",", ":")))
+            )
 
     def stop(self):
+        action = {
+            "schema_version": "1.0",
+            "kind": "cancel",
+            "generation": self.controller.generation + 1,
+        }
+        self.action_publisher.publish(
+            String(data=json.dumps(action, sort_keys=True, separators=(",", ":")))
+        )
         self.publisher.publish(Twist())
 
 

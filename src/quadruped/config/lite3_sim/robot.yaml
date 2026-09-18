@@ -95,3 +95,4 @@ controller_params:
 is_sim: true
 
 
+# Emotion-expression limits and choreography live in emotion_bot_ros/config/default.yaml.

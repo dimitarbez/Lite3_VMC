@@ -173,7 +173,14 @@ FSM_StateName qrFSMStateLocomotion<T>::CheckTransition()
          * Different gaits and MPC-WBC standing can be considered as substates of locomotion.
          */
         case GAIT_TRANSITION:
-            this->transitionDuration = 2.0;
+            // Emotion joy enters advanced trot from an already stable stand.
+            // It does not need the full two-second gait-to-gait handoff, which
+            // otherwise consumes almost the entire 2.4-second joy entrance.
+            this->transitionDuration =
+                (this->_data->gaitGenerator->gait == "stand"
+                 && this->_data->desiredStateCommand->getJoyCtrlState()
+                        == Quadruped::RC_MODE::JOY_ADVANCED_TROT)
+                    ? 0.5 : 2.0;
             iter = 0;
             printf("FSM_State_Locomotion: reset iter for GAIT_TRANSITION!!!\n");
             break;
@@ -274,6 +281,29 @@ bool qrFSMStateLocomotion<T>::SwitchMode()
     qrRobot *robot = this->_data->quadruped;
 
     if (iter >= this->transitionDuration * 1000) {
+        // A JOY_* change while already inside LOCOMOTION does not call
+        // OnEnter(), so the old gait used to remain installed here.  In
+        // particular, selecting emotion joy from JOY_STAND left the gait
+        // generator on "stand" while velocity commands were applied.  Apply
+        // the requested sub-mode only after the old gait has reached the
+        // four-contact transition pose, then reset every dependent planner.
+        switch (this->_data->desiredStateCommand->getJoyCtrlState()) {
+        case Quadruped::RC_MODE::JOY_TROT:
+            robot->controlParams["mode"] = LocomotionMode::VELOCITY_LOCOMOTION;
+            this->_data->gaitGenerator->gait = "trot";
+            break;
+        case Quadruped::RC_MODE::JOY_ADVANCED_TROT:
+            robot->controlParams["mode"] = LocomotionMode::ADVANCED_TROT;
+            this->_data->gaitGenerator->gait = "advanced_trot";
+            break;
+        case Quadruped::RC_MODE::JOY_WALK:
+            robot->controlParams["mode"] = LocomotionMode::WALK_LOCOMOTION;
+            this->_data->gaitGenerator->gait = "walk";
+            break;
+        default:
+            break;
+        }
+        locomotionController->Reset();
         robot->fsmMode = K_LOCOMOTION;
         iter = 0;
         this->transitionData.done = true;
@@ -316,6 +346,12 @@ bool qrFSMStateLocomotion<T>::StandLoop()
     /* Similar logic to %SwitchMode(). */
     qrRobot *robot = this->_data->quadruped;
     if (iter >= 1000) {
+        // Returning from joy locomotion must also replace the gait schedule.
+        // Merely changing RC_MODE to JOY_STAND leaves advanced-trot swing
+        // phases alive, which produces a splayed asymmetric "stuck" pose and
+        // prevents later fear/anger posture commands from being expressed.
+        this->_data->gaitGenerator->gait = "stand";
+        locomotionController->Reset();
         robot->fsmMode = K_LOCOMOTION;
         iter = 0;
         this->transitionData.done = true;

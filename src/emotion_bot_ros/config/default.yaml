@@ -47,30 +47,51 @@ mapper:
   fluid:
     valence_tau: 0.45
     arousal_tau: 0.35
-    blend_time: 0.18
-    neutral_return_time: 0.35
-    min_dwell: 0.30
-    # Restart a same-category gesture when valence/arousal changes enough to be
-    # perceptible. This makes escalating conversation visibly affect the body.
+    blend_time: 0.14
+    # Non-neutral emotion changes first cancel the old gesture and reach an
+    # exact neutral pose for this short interval before the new entrance starts.
+    neutral_return_time: 0.25
+    # Hold the exact canonical stance long enough for Gazebo's physical body
+    # and legs to settle before the next entrance begins. This prevents pose
+    # residue from accumulating across several rapid emotion changes.
+    neutral_hold_time: 0.35
+    min_dwell: 0.12
+    # Compatibility tuning key; same-category conversation appraisals now
+    # adjust intensity without restarting the active loop.
     hysteresis: 0.06
-    min_intensity: 0.55
-    max_linear_rate: 0.35
-    max_yaw_rate: 1.50
+    # Expressions are meant to read immediately in the close Gazebo view. Keep
+    # conversational arousal as a modifier, but never shrink choreography into
+    # a barely numerical pose change.
+    min_intensity: 1.0
+    # Final theatrical gain applied after interpolation. This deliberately
+    # drives the enlarged simulation-only safety/controller envelope.
+    amplitude_scale: 1.25
+    # Entrances remain theatrical, while recurring body language settles into
+    # a calmer rhythm instead of repeating the full-power pose on every beat.
+    idle_amplitude_scale: 0.65
+    idle_time_scale: 1.25
+    max_linear_rate: 0.80
+    max_yaw_rate: 3.50
 
 safety:
   motion_enabled: false
-  # Explicitly enabled for the supervised Gazebo expression demo. The bridge
-  # still owns all gait changes, clamps all axes, and stops on watchdog/health
-  # faults; this is never a real-robot setting.
-  allow_locomotion: false
+  # Chat expressions stay centered inside a bounded Gazebo envelope. The bridge
+  # smoothly recenters the dynamic model at the soft radius.
+  allow_locomotion: true
   allow_dynamic_actions: true
   monitor_sim_health: false
-  minimum_body_height: 0.18
-  maximum_body_height: 0.40
-  maximum_tilt: 0.60
-  # A forceful Gazebo stomp/landing can make the contact model slip several
-  # centimetres. This remains a cumulative displacement stop, not locomotion.
-  maximum_planar_displacement: 0.080
+  minimum_body_height: 0.10
+  maximum_body_height: 0.50
+  maximum_tilt: 1.20
+  # Hard emergency boundary; normal roaming turns around much earlier.
+  maximum_planar_displacement: 0.20
+  home_return:
+    enabled: true
+    trigger_radius: 0.09
+    resume_radius: 0.035
+    # A short Gazebo-only correction keeps the model unfixed, but avoids the
+    # upstream gait-entry lunge when recovering world position.
+    maximum_step: 0.012
   health_timeout: 0.50
   prepare_stance_on_ready: false
   stance_settle_time: 4.0
@@ -79,160 +100,176 @@ safety:
   # Allow a queued stance transition to complete before a one-shot action;
   # the input Twist watchdog remains 0.50 s.
   expression_timeout: 0.90
+  # Actions stay eligible while the bridge performs the bounded gait-to-stance
+  # sequence. Mapper staleness remains independent and emits an explicit cancel.
+  action_queue_timeout: 4.0
+  locomotion_zero_hold: 0.25
   manual_timeout: 0.50
   manual_priority_hold: 0.75
   mode_transition_delay: 0.35
+  # The simulator's stand-to-advanced-trot submode switch takes 0.5 seconds.
+  # Do not allow a new posture/action to interrupt that internal transition.
+  gait_transition_guard: 0.60
   minimum_locomotion_time: 2.00
   manual_locomotion_timeout: 4.00
-  locomotion_command_delay: 1.10
+  # The controller's stand-to-emotion-trot handoff is 0.50 s; retain a small
+  # settling margin before forwarding joy's bounded velocity.
+  locomotion_command_delay: 0.65
   limits:
     linear_x: 0.10
     linear_y: 0.05
     angular_z: 0.10
-    body_height: 0.035
-    roll: 0.20
-    pitch: 0.20
+    body_height: 0.100
+    roll: 0.625
+    pitch: 0.625
     linear_rate: 0.18
     yaw_rate: 0.30
-    body_height_rate: 0.12
-    attitude_rate: 0.70
+    body_height_rate: 0.75
+    attitude_rate: 5.00
 
 mappings:
   neutral:
-    intensity: 0.35
-    duration: 0.80
-    speed: 0.55
-    acceleration: 0.55
-    cooldown: 0.25
-    variation: 0.05
-    transition_blend: 0.35
-    segments:
-      - {duration: 0.35, z: 0.004, roll: 0.0, pitch: 0.0}
-      - {duration: 0.45, z: 0.0, roll: 0.0, pitch: 0.0}
-    # Exact zero idle makes every stale/failure route visibly stationary.
-    idle_segments:
-      - {duration: 2.0, z: 0.0, roll: 0.0, pitch: 0.0}
-  joy:
-    intensity: 1.0
-    duration: 0.90
-    speed: 1.20
-    acceleration: 1.20
-    cooldown: 0.35
-    variation: 0.12
-    transition_blend: 0.13
-    segments:
-      - {duration: 0.45, x: 0.040, y: 0.016, yaw: 0.045, z: -0.010}
-      - {duration: 0.70, x: 0.050, y: -0.022, yaw: -0.055, z: 0.022}
-      - {duration: 0.70, x: 0.045, y: 0.022, yaw: 0.055, z: 0.018}
-    idle_segments:
-      - {duration: 1.10, x: 0.045, y: 0.022, yaw: 0.055, z: 0.018}
-      - {duration: 1.10, x: 0.038, y: -0.022, yaw: -0.055, z: 0.024}
-  sadness:
-    intensity: 0.80
-    duration: 1.35
-    speed: 0.55
-    acceleration: 0.55
-    cooldown: 0.60
-    variation: 0.06
-    transition_blend: 0.38
-    segments:
-      - {duration: 0.70, z: -0.048, roll: 0.0, pitch: 0.18}
-      - {duration: 0.65, z: -0.055, roll: -0.16, pitch: 0.22}
-    idle_segments:
-      - {duration: 1.50, z: -0.050, roll: -0.12, pitch: 0.18}
-      - {duration: 1.50, z: -0.045, roll: 0.08, pitch: 0.16}
-  anger:
-    intensity: 1.0
-    duration: 0.95
-    speed: 1.25
-    acceleration: 1.40
-    cooldown: 0.55
-    variation: 0.10
-    transition_blend: 0.11
-    segments:
-      # Reserve the complete raise, slam, and rebound for the one-shot action;
-      # the angry body sway begins only after the percussive motion completes.
-      - {duration: 1.58, z: 0.0, roll: 0.0, pitch: 0.0, action: stomp}
-      - {duration: 0.25, z: -0.018, roll: 0.08, pitch: 0.0}
-      - {duration: 0.32, z: -0.022, roll: -0.08, pitch: 0.0}
-      - {duration: 0.20, z: -0.014, roll: 0.0, pitch: 0.0}
-    idle_segments:
-      - {duration: 0.52, z: -0.018, roll: 0.08, pitch: 0.0}
-      - {duration: 0.52, z: -0.020, roll: -0.08, pitch: 0.0}
-  fear:
-    intensity: 0.90
-    duration: 1.10
-    speed: 1.00
-    acceleration: 1.05
-    cooldown: 0.45
-    variation: 0.14
-    transition_blend: 0.16
-    segments:
-      # A pronounced but stance-safe recoil/crouch makes fear legible in the
-      # real Gazebo body rather than only in the commanded Twist values.
-      - {duration: 0.30, z: 0.015, roll: 0.14, pitch: 0.0}
-      - {duration: 0.45, z: -0.055, roll: 0.40, pitch: 0.18}
-      - {duration: 0.35, z: -0.048, roll: -0.34, pitch: 0.15}
-    idle_segments:
-      - {duration: 0.42, z: -0.048, roll: 0.32, pitch: 0.15}
-      - {duration: 0.42, z: -0.052, roll: -0.32, pitch: 0.15}
-  surprise:
-    intensity: 1.0
-    duration: 0.85
-    speed: 1.30
-    acceleration: 1.40
-    cooldown: 0.55
-    variation: 0.08
-    transition_blend: 0.09
-    segments:
-      - {duration: 0.16, z: -0.012, roll: 0.0, pitch: 0.0}
-      - {duration: 0.28, z: 0.0, roll: 0.0, pitch: 0.0, action: hop}
-      - {duration: 0.41, z: -0.014, roll: 0.0, pitch: -0.06}
-    idle_segments:
-      - {duration: 0.70, z: 0.014, roll: 0.0, pitch: -0.06}
-      - {duration: 0.70, z: 0.010, roll: 0.04, pitch: -0.05}
-  disgust:
-    intensity: 0.92
-    duration: 1.00
-    speed: 0.82
-    acceleration: 0.90
-    cooldown: 0.55
-    variation: 0.08
-    transition_blend: 0.18
-    segments:
-      - {duration: 0.28, z: 0.014, roll: 0.0, pitch: 0.0}
-      - {duration: 0.42, z: -0.040, roll: -0.42, pitch: 0.13}
-      - {duration: 0.30, z: -0.033, roll: -0.30, pitch: 0.10}
-    idle_segments:
-      - {duration: 0.90, z: -0.035, roll: -0.32, pitch: 0.10}
-      - {duration: 0.90, z: -0.030, roll: -0.24, pitch: 0.08}
-  curiosity:
     intensity: 0.82
     duration: 1.0
-    speed: 0.85
-    acceleration: 0.88
-    cooldown: 0.38
-    variation: 0.10
-    transition_blend: 0.20
+    speed: 1.0
+    acceleration: 0.80
+    cooldown: 0.25
+    variation: 0.0
+    transition_blend: 0.14
     segments:
-      - {duration: 0.36, z: 0.025, roll: 0.36, pitch: -0.10}
-      - {duration: 0.32, z: 0.032, roll: -0.18, pitch: -0.12}
-      - {duration: 0.32, z: 0.025, roll: 0.24, pitch: -0.10}
+      - {duration: 0.25, z: 0.025, roll: 0.070, pitch: -0.055}
     idle_segments:
-      - {duration: 0.85, z: 0.026, roll: 0.26, pitch: -0.10}
-      - {duration: 0.85, z: 0.030, roll: -0.26, pitch: -0.10}
-  affection:
-    intensity: 0.76
-    duration: 1.10
-    speed: 0.70
-    acceleration: 0.70
+      - {duration: 0.55, z: 0.025, roll: 0.070, pitch: -0.055}
+      - {duration: 0.55, z: -0.015, roll: -0.070, pitch: 0.045}
+  joy:
+    intensity: 1.0
+    duration: 1.0
+    speed: 1.0
+    acceleration: 1.20
+    cooldown: 0.35
+    variation: 0.0
+    transition_blend: 0.12
+    segments:
+      # Joy is energetic but centered: a full-height simulator hop followed by
+      # big, fast body rocks. No unstable walking gait is selected.
+      - {duration: 0.55, z: -0.055, action: hop}
+      - {duration: 0.20, z: 0.080, roll: 0.480, pitch: -0.380}
+      - {duration: 0.20, z: -0.060, roll: -0.480, pitch: 0.340}
+      - {duration: 0.18, z: 0.075, roll: 0.440, pitch: -0.350}
+    idle_segments:
+      - {duration: 0.28, z: 0.080, roll: 0.480, pitch: -0.380}
+      - {duration: 0.28, z: -0.060, roll: -0.480, pitch: 0.340}
+      - {duration: 0.28, z: 0.078, roll: -0.440, pitch: -0.360}
+      - {duration: 0.28, z: -0.050, roll: 0.440, pitch: 0.300}
+  sadness:
+    intensity: 1.0
+    duration: 1.0
+    speed: 1.0
+    acceleration: 0.72
+    cooldown: 0.60
+    variation: 0.0
+    transition_blend: 0.18
+    segments:
+      - {duration: 0.28, z: -0.055, roll: -0.180, pitch: 0.350}
+      - {duration: 0.38, z: -0.080, roll: -0.320, pitch: 0.500}
+    idle_segments:
+      - {duration: 0.75, z: -0.080, roll: -0.330, pitch: 0.500}
+      - {duration: 0.75, z: -0.065, roll: 0.330, pitch: 0.420}
+  anger:
+    intensity: 1.0
+    duration: 1.0
+    speed: 1.0
+    acceleration: 1.40
+    cooldown: 0.55
+    variation: 0.0
+    transition_blend: 0.12
+    segments:
+      - {duration: 0.75, action: stomp}
+      - {duration: 0.24, z: -0.075, roll: 0.450, pitch: 0.360}
+      - {duration: 0.24, z: -0.060, roll: -0.450, pitch: 0.340}
+      - {duration: 0.24, z: -0.078, roll: 0.400, pitch: 0.400}
+    idle_segments:
+      - {duration: 0.75, z: -0.070, action: stomp}
+      - {duration: 0.30, z: -0.078, roll: 0.460, pitch: 0.400}
+      - {duration: 0.30, z: -0.060, roll: -0.460, pitch: 0.340}
+      - {duration: 0.30, z: -0.078, roll: 0.420, pitch: 0.400}
+      - {duration: 0.30, z: -0.060, roll: -0.420, pitch: 0.340}
+  fear:
+    intensity: 1.0
+    duration: 1.0
+    speed: 1.00
+    acceleration: 1.35
     cooldown: 0.45
-    variation: 0.12
-    transition_blend: 0.28
+    variation: 0.0
+    transition_blend: 0.10
     segments:
-      - {duration: 0.40, z: -0.016, roll: 0.20, pitch: -0.08}
-      - {duration: 0.36, z: 0.018, roll: 0.35, pitch: -0.10}
-      - {duration: 0.34, z: 0.004, roll: -0.20, pitch: -0.08}
+      - {duration: 0.10, z: 0.045, pitch: -0.300}
+      - {duration: 0.20, z: -0.080, roll: 0.500, pitch: 0.470}
+      - {duration: 0.18, z: -0.070, roll: -0.500, pitch: 0.380}
     idle_segments:
-      - {duration: 1.05, z: 0.010, roll: 0.25, pitch: -0.08}
-      - {duration: 1.05, z: 0.004, roll: -0.20, pitch: -0.08}
+      - {duration: 0.18, z: -0.080, roll: 0.500, pitch: 0.470}
+      - {duration: 0.18, z: -0.068, roll: -0.500, pitch: 0.380}
+  surprise:
+    intensity: 1.0
+    duration: 1.0
+    speed: 1.0
+    acceleration: 1.40
+    cooldown: 0.55
+    variation: 0.0
+    transition_blend: 0.10
+    segments:
+      - {duration: 0.55, action: hop}
+      - {duration: 0.20, z: 0.080, roll: 0.220, pitch: -0.500}
+    idle_segments:
+      - {duration: 0.32, z: 0.080, roll: 0.240, pitch: -0.500}
+      - {duration: 0.32, z: 0.045, roll: -0.240, pitch: -0.320}
+      - {duration: 0.32, z: 0.078, roll: -0.220, pitch: -0.480}
+      - {duration: 0.32, z: 0.045, roll: 0.220, pitch: -0.320}
+  disgust:
+    intensity: 1.0
+    duration: 1.00
+    speed: 1.0
+    acceleration: 1.10
+    cooldown: 0.55
+    variation: 0.0
+    transition_blend: 0.12
+    segments:
+      - {duration: 0.12, z: 0.040, roll: 0.180, pitch: -0.220}
+      - {duration: 0.26, z: -0.075, roll: -0.500, pitch: 0.500}
+      - {duration: 0.22, z: -0.035, roll: -0.250, pitch: 0.260}
+    idle_segments:
+      - {duration: 0.38, z: -0.075, roll: -0.500, pitch: 0.500}
+      - {duration: 0.38, z: -0.030, roll: -0.220, pitch: 0.220}
+      - {duration: 0.38, z: -0.068, roll: -0.470, pitch: 0.460}
+      - {duration: 0.38, z: -0.025, roll: -0.180, pitch: 0.180}
+  curiosity:
+    intensity: 1.0
+    duration: 1.0
+    speed: 1.0
+    acceleration: 1.10
+    cooldown: 0.38
+    variation: 0.0
+    transition_blend: 0.12
+    segments:
+      - {duration: 0.24, z: 0.045, roll: 0.500, pitch: -0.420}
+      - {duration: 0.26, z: 0.035, roll: -0.500, pitch: 0.300}
+    idle_segments:
+      - {duration: 0.48, z: 0.045, roll: 0.500, pitch: -0.420}
+      - {duration: 0.48, z: 0.030, roll: -0.500, pitch: 0.300}
+  affection:
+    intensity: 1.0
+    duration: 1.0
+    speed: 1.0
+    acceleration: 0.88
+    cooldown: 0.45
+    variation: 0.0
+    transition_blend: 0.16
+    segments:
+      - {duration: 0.22, z: 0.025, roll: 0.260, pitch: -0.160}
+      - {duration: 0.34, z: 0.045, roll: 0.480, pitch: -0.240}
+      - {duration: 0.34, z: 0.025, roll: -0.480, pitch: -0.160}
+    idle_segments:
+      - {duration: 0.55, z: 0.045, roll: 0.480, pitch: -0.240}
+      - {duration: 0.55, z: 0.020, roll: -0.480, pitch: -0.150}
+      - {duration: 0.55, z: 0.040, roll: -0.420, pitch: -0.240}
+      - {duration: 0.55, z: 0.020, roll: 0.420, pitch: -0.150}

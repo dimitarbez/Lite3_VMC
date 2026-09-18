@@ -70,6 +70,7 @@ MPCStanceLegController::MPCStanceLegController(
 
 void MPCStanceLegController::Reset(float t)
 {
+    simStanceAnchorValid = false;
     rpyComp.setZero();
     f_ff.setZero();
     f.setZero();
@@ -142,7 +143,16 @@ std::tuple<std::map<int, qrMotorCommand>, Eigen::Matrix<float, 3, 4>> MPCStanceL
         motorTorques = this->robot->MapContactForceToJointTorques(legId, f_ff.col(legId));
 
         for (std::map<int, float>::iterator it = motorTorques.begin(); it != motorTorques.end(); ++it) {
-            if (gaitGenerator->legState[legId] == LegState::EARLY_CONTACT && it->first % 3 == 0) {
+            const bool simExpressionStance = robot->isSim
+                && desiredStateCommand->getJoyCtrlState() == RC_MODE::JOY_STAND;
+            if (simExpressionStance && it->first % 3 == 0) {
+                // MPC contact forces alone leave planted abduction joints with
+                // zero position stiffness. A firm centering term prevents the
+                // post-gait splay observed in Gazebo without altering height,
+                // attitude, swing joints, or any physical-robot controller.
+                qrMotorCommand temp{0., 40.0, 0., 3.0, it->second};
+                legCommand[it->first] = temp;
+            } else if (gaitGenerator->legState[legId] == LegState::EARLY_CONTACT && it->first % 3 == 0) {
                 // MotorCommand temp{0., 0., 0., 1.0, it->second};
                 qrMotorCommand temp{0., 100.0, 0., 3.0, it->second};
                 legCommand[it->first] = temp;
@@ -276,6 +286,13 @@ void MPCStanceLegController::Run(std::map<int, qrMotorCommand> &legCommand, int 
     if (desiredStateCommand->getJoyCtrlState() == RC_MODE::JOY_STAND) {
         factor1 = 0;
     }
+    const bool simStanding = robot->isSim && factor1 == 0;
+    if (simStanding && !simStanceAnchorValid) {
+        simStanceAnchor = robot->gazeboBasePosition;
+        simStanceAnchorValid = true;
+    } else if (!simStanding) {
+        simStanceAnchorValid = false;
+    }
     /* Update desired position and linear velocity in world frame by Spline. */
     Vec12<float> baseStartState = footholdPlanner->firstSwingBaseState;
     for (u8 axis(0); axis < 2; ++axis) {
@@ -283,7 +300,7 @@ void MPCStanceLegController::Run(std::map<int, qrMotorCommand> &legCommand, int 
         auto ePoint = robotics::math::qrSpline::Point(comDestination[axis], vDesWorld[axis], 0.05);
         res.x = (1 - t) * sPoint.x + t * ePoint.x;
         res.xd = ePoint.xd;
-        posDesiredinWorld[axis] = factor1*res.x;
+        posDesiredinWorld[axis] = simStanding ? simStanceAnchor[axis] : factor1*res.x;
         vDesWorld[axis] = factor1*res.xd;
     }
 

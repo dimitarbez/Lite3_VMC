@@ -134,5 +134,11 @@ target_link_libraries(quadruped PUBLIC
 
 add_dependencies(quadruped ${catkin_EXPORTED_TARGETS})
 
+if(CATKIN_ENABLE_TESTING)
+    catkin_add_gtest(test_expression_trajectory test/test_expression_trajectory.cpp)
+    if(TARGET test_expression_trajectory)
+        target_include_directories(test_expression_trajectory PRIVATE include/quadruped)
+    endif()
+endif()
 
 

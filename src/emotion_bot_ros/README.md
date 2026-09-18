@@ -36,7 +36,7 @@ The integrated safety bridge is a required roslaunch node. Its failure tears dow
 | `/emotion_bot/state` | `std_msgs/String` | Latched validated JSON state; heartbeat keeps the sequence and turn ID. |
 | `/emotion_bot/response` | `std_msgs/String` | Compatibility local response for `/emotion_bot/input`. |
 | `/emotion_bot/expression_cmd` | `geometry_msgs/Twist` | Fluid expression intention; normal profiles use height (`linear.z`), roll (`angular.x`), and pitch (`angular.y`) while standing. |
-| `/emotion_bot/expression_action` | `std_msgs/String` | Optional one-shot mapper request: `hop` or `stomp`; it is rejected by the default planted-expression configuration and remains available only for supervised experiments. |
+| `/emotion_bot/expression_action` | `std_msgs/String` | Generation-aware JSON `start`/`cancel` requests for `hop` or `stomp`; legacy plain action strings remain accepted. |
 | `/emotion_bot/safe_cmd` | `geometry_msgs/Twist` | Selected and clamped intention for inspection, not simulator transport. |
 | `/emotion_bot/manual_joy` | `sensor_msgs/Joy` | Manual arbitration input. |
 | `/emotion_bot/joy_out` | `sensor_msgs/Joy` | Sole Joy input remapped to the Lite3 simulation controller. |
@@ -77,26 +77,34 @@ The sidecar binds `127.0.0.1:8765`. `/v1/stream` accepts only bounded JSON and e
 
 For persistent local use, put the credential in the workspace root `.env` as `OPENAI_API_KEY=...`; the file is Git-ignored and should remain mode `600`. The wrapper sources it automatically for `start-openai-bridge`. Docker passes only the variable name with `--env OPENAI_API_KEY` (no value in arguments) and starts the sidecar with `--rm`; `/health` exposes only booleans for key presence/test mode.
 
+## Expression action contract 1.0
+
+The mapper publishes compact JSON. An emotion change, stale state, or mapper shutdown emits `{"schema_version":"1.0","kind":"cancel","generation":N}`. An occurrence then emits `{"schema_version":"1.0","kind":"start","action":"stomp","emotion":"anger","generation":N,"occurrence_id":"idle:0:4"}`. The bridge rejects malformed or older generations, suppresses duplicate occurrence IDs, and preserves cancel-before-start order. Plain `hop` and `stomp` strings remain supported for existing tools.
+
+Joy buttons 4 and 5 request the bounded hop and stomp inside the simulation controller. Button 6 is reserved internally for graceful cancellation and recovery, and button 7 is available only to the explicit locomotion-development path; neither internal button is forwarded from manual control.
+
 ## Fluid mapping
 
-All nine expression profiles remain configurable under `/emotion_bot/mappings`. Each profile has an entrance `segments` list and a looping `idle_segments` list: a state change immediately interrupts/blends into the new entrance, then repeats the idle body language until another state, timeout, disable, or shutdown. Every emotion exposes `intensity`, `duration`, `speed`, `acceleration`, `cooldown`, `variation`, and `transition_blend` alongside those segment lists. `duration` and `speed` scale the entrance/cadence; `acceleration` scales mapper slew only; `cooldown` prevents a repeated state from restarting too rapidly; and deterministic `variation` prevents a held profile from freezing into a statue.
+All nine expression profiles remain configurable under `/emotion_bot/mappings`. Each profile has an entrance `segments` list and a looping `idle_segments` list. A non-neutral category change cancels the old gesture, returns to exact zero for 0.25 seconds, holds the canonical stance for 0.35 seconds, then starts the new entrance from scratch. Same-category conversation appraisals update intensity without restarting the loop. Segment poses are keyframe endpoints joined by quintic smootherstep interpolation, giving zero velocity and acceleration at every keyframe and loop seam. Entrances use a global 1.25 amplitude gain; idle keyframes use 65% amplitude and 1.25x duration for softer recurring movement. `duration` and `speed` scale entrance/cadence, and `acceleration` scales mapper slew.
 
 The fixed-rate controller adds:
 
 - elapsed-time valence/arousal low-pass filters (`0.45`/`0.35` s);
-- immediate category interruption with smoothstep profile-specific transition blending (and a `0.35` s neutral return);
-- bounded same-category replay after the profile cooldown, so repeated emotional events read without rapid-trigger chatter;
-- continuous arousal intensity scaling above a theatrical `0.55` floor;
-- body-height slew limit `0.25 m/s` and roll/pitch slew limit `1.50 rad/s`;
-- optional x/y slew limit `0.18 m/s²` and yaw slew limit `0.30 rad/s` for supervised locomotion experiments.
+- category changes with an exact-neutral reset before the new entrance;
+- continuous same-category loops without duplicate action pulses from user/assistant appraisals;
+- continuous arousal intensity scaling above a theatrical `0.82` floor;
+- body-height slew limit `0.18 m/s` and roll/pitch slew limit `1.00 rad/s`;
+- zero x/y/yaw commands for every normal chat expression.
 
-Segment values use a deliberately theatrical simulation posture envelope: body height is bounded to ±0.070 m and roll/pitch to ±0.50 rad; normal negative segments stop at -0.055 m to preserve crouch clearance. Neutral settles quietly to exact zero, joy anticipates then bounces/rocks, sadness lowers and bows, anger makes a planted stomp-like brace and tense sway, fear recoils into a trembling crouch, surprise recoils then springs into alertness, disgust leans away, curiosity tilts between sides, and affection sways warmly. Segment duration must be finite and in `(0,10]`. Segments may declare the optional simulation-only action `hop` or `stomp`; no other actions are valid. Default profiles intentionally do not use them because the upstream discrete actions accumulated planar drift during Gazebo validation.
+The enlarged simulation envelope is ±0.100 m height and ±0.625 rad roll/pitch. Active neutral visibly breathes and tilts on a soft 1.375-second loop; stale state, disable, and shutdown reach exact zero. Joy starts with one full centered hop and repeats a 1.40-second high/low rock. Sadness holds a deep bow and slow 1.875-second sway. Anger starts with a forceful symmetric multi-impact stomp and repeats a stomp plus tense low rocking every 2.4375 seconds. Fear rapidly trembles in a full crouch, surprise performs a full hop into a tall pitched-back 1.60-second alert loop, disgust pulses down and away on a 1.90-second loop, curiosity alternates broad head/body tilts every 1.20 seconds, and affection uses a 2.75-second warm sway.
+
+The controller-side 0.75-second stomp follows vertical offsets `-0.069`, `+0.100`, `-0.088`, `+0.063`, `-0.075`, `+0.044`, and `0.0` m, with a short smooth recovery. The 0.55-second hop uses offsets `-0.069`, `+0.100`, `-0.050`, and `0.0` m. Both actions use smooth controller-side interpolation, cap vertical speed at 1.125 m/s, and neither applies an external Gazebo wrench.
 
 ## Safety and manual arbitration
 
-Initial output and initial motion permission are zero/false. After the simulation controller reports ready, the integrated launch enters `JOY_STAND` once and waits four simulated seconds for the upstream stance transition to settle before motion can be enabled. Normal expressions then keep four feet planted, clamp body-height offset to ±0.070 m and roll/pitch to ±0.50 rad, and rate-limit them to 0.25 m/s and 1.50 rad/s. Optional `hop`/`stomp` actions are gated off by default because they were observed to accumulate planar drift; they never select a gait or publish x/y/yaw when explicitly enabled for a supervised experiment. Translational and yaw locomotion are forced to exact zero while `allow_locomotion` is false, preventing the upstream trot controller's accumulated drift and NaN-prone repeated gait transitions. Integrated simulation also monitors all 12 joint states, finite model pose, torso height, roll/pitch, and a 0.040 m planar-displacement limit from the enable point; a violation or a 0.5-second monitoring gap disables motion immediately and is reported in `/emotion_bot/status`.
+The integrated launch begins at zero, enters `JOY_STAND`, waits four simulated seconds for the stance transition, and then enables motion automatically. Every normal emotion profile has zero x/y/yaw, so joy cannot walk away while expressing itself. A simulation-only 40 Nm/rad HipX centering term keeps all four legs under the body instead of allowing contact forces to leave them crossed or splayed; physical-robot control is unchanged. The Gazebo model is not fixed: the bridge records its enable-time center, begins a four-foot recovery at 0.09 m, applies bounded 0.012 m incremental simulator corrections until it is within 0.035 m, then releases it; 0.20 m remains a hard safety boundary. Returning from an explicitly requested gait also guards the upstream transition before releasing a posture or queued action.
 
-Manual posture axes are bounded by the same limits and manual activity has priority for 0.75 seconds. `run-emotion-keyboard` selects posture mode: w/s pitch, a/d roll, and q/e height. Locomotion axes and X are blocked by default. Setting `allow_locomotion: true` restores the former supervised B/X/directional path, including one-shot mode buttons, settling delay, bounded velocity, slew limits, and automatic stand timeout. Emotion/manual commands expire after 0.5 seconds and state expires after 1.0 second. Completion, stale state, disable, readiness loss, and upstream node failure converge to exact neutral posture and zero velocity. There is no real executable, UDP bridge, or hardware address in this package.
+Manual posture axes are bounded by the same limits and manual activity has priority for 0.75 seconds. `run-emotion-keyboard` selects posture mode: w/s pitch, a/d roll, and q/e height. Locomotion remains available only for explicit development/manual commands; chat emotions stay centered. Emotion/manual commands expire after 0.5 seconds and state expires after 1.0 second. Completion, stale state, disable, readiness loss, and upstream node failure converge to exact neutral posture and zero velocity. There is no real executable, UDP bridge, or hardware address in this package.
 
 ## Parameters
 
@@ -116,7 +124,8 @@ Manual posture axes are bounded by the same limits and manual activity has prior
 make -C lite3-noetic run-emotion-sim
 make -C lite3-noetic run-emotion-chat
 make -C lite3-noetic emotion-demo EMOTION_MOTION=true
+make -C lite3-noetic emotion-animation-review
 make -C lite3-noetic verify-emotion
 ```
 
-Unit tests cover state/event contracts, every profile's parameters, sustained idle loops, filtering/blending/cooldowns/rates, rapid interruption, neutral return, bounds, timeout/fallback/cancellation/late results, default disable, one-shot manual buttons, and safety arbitration. ROS integration covers deterministic streaming and turn-correlated state plus enable/limits/watchdogs/manual/adapter/mapper loss. The sidecar test crosses the real HTTP process boundary without a key. Gazebo E2E drives all nine profiles, measures each transition and idle movement, tests rapid/repeated changes, validates physical/manual motion and stops, checks standing height/teardown, and rejects real-hardware paths.
+`emotion-animation-review` launches the planted GUI stack and holds every emotion through at least two complete idle loops. Python unit tests cover interpolation seams, active-neutral/stale behavior, repeating occurrences, generation order, queued actions, gait transitions, and the documented natural-language sequence. The controller's C++ suite samples exact stomp/hop keyframes and verifies cancellation continuity, bounded velocity, moving-target recovery, and recovery interruption. The planted Gazebo diagnostic remains `emotion-gazebo-test`; `emotion-animation-gazebo-test` holds two idle cycles per emotion and checks entrance and idle movement, containment, joint margin, mirrored stomps, recovery, rapid joy→anger→fear changes, falls/NaNs/errors, residual motion, and the no-hardware boundary.

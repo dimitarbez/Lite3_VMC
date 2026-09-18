@@ -38,6 +38,7 @@
 #include "config/qr_config.h"
 #include "utils/qr_cpptypes.h"
 #include "robots/qr_robot.h"
+#include "controllers/qr_expression_trajectory.hpp"
 
 
 namespace Quadruped {
@@ -254,9 +255,9 @@ private:
 
     // One-shot, simulation-only in-place actions triggered exclusively by the
     // emotion safety bridge.  They never select a trot gait or command x/y/yaw.
-    enum class ExpressionAction { NONE, HOP, STOMP };
-    ExpressionAction expressionAction = ExpressionAction::NONE;
-    double expressionActionStartedAt = -1.0;
+    using ExpressionAction = ExpressionTrajectory::Action;
+    ExpressionTrajectory expressionTrajectory;
+    ExpressionPose expressionPose;
 
     /**
      * @brief Linear velocity on Z Axis from joy control.
@@ -398,22 +399,16 @@ private:
 
     // Simulation expression envelope. Locomotion remains independently gated;
     // these values only shape the four-contact JOY_STAND posture.
-    const float EMOTION_HEIGHT_OFFSET_MAX = 0.070f;
-    const float EMOTION_ROLL_MAX = 0.50f;
-    const float EMOTION_PITCH_MAX = 0.50f;
-    // Gazebo-only theatrical actions. Locomotion stays disabled: these values
-    // produce a pronounced vertical reaction while the stance controller owns
-    // all four legs. They are never forwarded to the hardware command path.
-    const float EXPRESSION_HOP_HEIGHT = 0.045f;
-    const float EXPRESSION_HOP_CROUCH = 0.028f;
-    const float EXPRESSION_HOP_UP_VELOCITY = 0.32f;
-    const float EXPRESSION_HOP_DOWN_VELOCITY = -0.25f;
-    const float EXPRESSION_STOMP_RAISE = 0.060f;
-    const float EXPRESSION_STOMP_CROUCH = 0.050f;
-    const float EXPRESSION_STOMP_UP_VELOCITY = 0.40f;
-    const float EXPRESSION_STOMP_DOWN_VELOCITY = -0.60f;
-    const float EXPRESSION_STOMP_REBOUND = 0.030f;
-    const float EXPRESSION_STOMP_REBOUND_VELOCITY = 0.34f;
+    // These must match emotion_bot_ros safety limits because Joy axes carry
+    // normalized values from that contract.
+    const float EMOTION_HEIGHT_OFFSET_MAX = 0.100f;
+    // Lift only the four-contact expression stance. Locomotion retains the
+    // robot's tuned nominal height and therefore its original stability.
+    const float EXPRESSION_STANCE_HEIGHT_BIAS = 0.015f;
+    const float EMOTION_ROLL_MAX = 0.625f;
+    const float EMOTION_PITCH_MAX = 0.625f;
+    // Gazebo-only actions stay within a conservative vertical envelope. Their
+    // piecewise quintic trajectory is defined in the implementation.
 
 };
 

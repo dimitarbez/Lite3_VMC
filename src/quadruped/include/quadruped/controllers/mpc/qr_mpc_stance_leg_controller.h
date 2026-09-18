@@ -84,6 +84,11 @@ public:
 
 private:
 
+    // Gazebo reports absolute world coordinates, including after FSM resets.
+    // Hold the stopping location instead of dragging planted feet to (0, 0).
+    bool simStanceAnchorValid = false;
+    Vec3<float> simStanceAnchor = Vec3<float>::Zero();
+
     /**
      * @brief Setup the desired command of the MPC problem.
      */

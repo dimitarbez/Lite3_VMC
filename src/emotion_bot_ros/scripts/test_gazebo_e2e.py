@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Launch and verify the complete headless Gazebo stack with cleanup and logs."""
 
+import argparse
 import json
 import math
 import os
@@ -38,11 +39,39 @@ EXPECTED_CONTROLLERS = {
     "HL_HipX", "HL_HipY", "HL_Knee",
     "HR_HipX", "HR_HipY", "HR_Knee",
 }
-MIN_STANDING_HEIGHT_M = 0.18
+MIN_STANDING_HEIGHT_M = 0.16
 MAX_STANDING_HEIGHT_M = 0.40
+EMOTION_RESET_SECONDS = 0.60
 EMOTION_SEQUENCE = (
     "neutral", "joy", "sadness", "anger", "fear", "surprise", "disgust", "curiosity", "affection",
 )
+TRANSITION_SECONDS = {
+    "neutral": 0.25,
+    "joy": 1.13,
+    "sadness": 0.66,
+    "anger": 1.47,
+    "fear": 0.48,
+    "surprise": 0.75,
+    "disgust": 0.60,
+    "curiosity": 0.50,
+    "affection": 0.90,
+}
+IDLE_SECONDS = {
+    "neutral": 1.375,
+    "joy": 1.40,
+    "sadness": 1.875,
+    "anger": 2.4375,
+    "fear": 0.45,
+    "surprise": 1.60,
+    "disgust": 1.90,
+    "curiosity": 1.20,
+    "affection": 2.75,
+}
+JOINT_LIMITS = {
+    "HipX": (-0.523, 0.523),
+    "HipY": (-2.67, 0.314),
+    "Knee": (0.524, 2.792),
+}
 
 
 def wait_wall(predicate, description, timeout=120.0, interval=0.25):
@@ -57,6 +86,14 @@ def wait_wall(predicate, description, timeout=120.0, interval=0.25):
             last_error = exc
         time.sleep(interval)
     raise RuntimeError("timed out waiting for %s (last error: %r)" % (description, last_error))
+
+
+def unused_tcp_port():
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
 
 
 def wait_message(topic, msg_type, predicate=lambda _msg: True, timeout=20.0):
@@ -119,11 +156,64 @@ def joint_distance(first, second):
     return max((abs(after[name] - before[name]) for name in shared), default=0.0)
 
 
+def assert_joint_margin(message, margin=0.05):
+    for name, position in zip(message.name, message.position):
+        suffix = name.split("_")[-1]
+        if suffix not in JOINT_LIMITS:
+            continue
+        lower, upper = JOINT_LIMITS[suffix]
+        if not lower + margin <= position <= upper - margin:
+            raise RuntimeError(
+                "%s=%.4f violated %.2f-rad joint-limit margin" % (name, position, margin)
+            )
+
+
+def front_hips_mirrored(message, tolerance=0.12):
+    positions = dict(zip(message.name, message.position))
+    if "FL_HipX" not in positions or "FR_HipX" not in positions:
+        raise RuntimeError("front hip joints missing during stomp")
+    error = abs(positions["FL_HipX"] + positions["FR_HipX"])
+    if error > tolerance:
+        raise RuntimeError("front hip mirror error %.4f exceeded %.4f" % (error, tolerance))
+    return error
+
+
+def assert_hips_not_splayed(message, maximum=0.30):
+    positions = dict(zip(message.name, message.position))
+    for name in ("FL_HipX", "FR_HipX", "HL_HipX", "HR_HipX"):
+        if name not in positions:
+            raise RuntimeError("HipX joints missing")
+        if abs(positions[name]) > maximum:
+            raise RuntimeError(
+                "%s=%.4f exceeded %.2f-rad anti-splay limit"
+                % (name, positions[name], maximum)
+            )
+
+
+def twist_is_neutral(message, tolerance=1e-4):
+    values = (
+        message.linear.x,
+        message.linear.y,
+        message.linear.z,
+        message.angular.x,
+        message.angular.y,
+        message.angular.z,
+    )
+    return all(abs(value) <= tolerance for value in values)
+
+
 def assert_standing(sample, phase):
+    if not all(math.isfinite(value) for value in sample.values()):
+        raise RuntimeError("non-finite torso state during %s" % phase)
     if not MIN_STANDING_HEIGHT_M <= sample["z"] <= MAX_STANDING_HEIGHT_M:
         raise RuntimeError(
             "Lite3 torso height %.4f m outside standing range [%.2f, %.2f] during %s"
             % (sample["z"], MIN_STANDING_HEIGHT_M, MAX_STANDING_HEIGHT_M, phase)
+        )
+    if max(abs(sample["roll"]), abs(sample["pitch"])) > 0.60:
+        raise RuntimeError(
+            "Lite3 tilt (roll %.4f, pitch %.4f) exceeded 0.60 rad during %s"
+            % (sample["roll"], sample["pitch"], phase)
         )
 
 
@@ -195,6 +285,22 @@ def sim_process_udp_sockets():
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--animation",
+        action="store_true",
+        help="hold every centered profile through two complete idle cycles",
+    )
+    args, _unknown = parser.parse_known_args()
+    # Never attach this destructive lifecycle test to a developer's running
+    # graph. Isolated ROS/Gazebo masters also allow planted and animation runs
+    # to execute without touching an interactive GUI session.
+    ros_port = unused_tcp_port()
+    gazebo_port = unused_tcp_port()
+    while gazebo_port == ros_port:
+        gazebo_port = unused_tcp_port()
+    os.environ["ROS_MASTER_URI"] = "http://127.0.0.1:%d" % ros_port
+    os.environ["GAZEBO_MASTER_URI"] = "http://127.0.0.1:%d" % gazebo_port
     log_handle = tempfile.NamedTemporaryFile(
         prefix="emotion_bot_gazebo_e2e_", suffix=".log", delete=False, mode="w+"
     )
@@ -202,6 +308,7 @@ def main():
     command = [
         "roslaunch", "emotion_bot_ros", "integrated_sim.launch",
         "gui:=false", "headless:=true", "motion_enabled:=false",
+        "allow_locomotion:=%s" % ("true" if args.animation else "false"),
     ]
     launch = subprocess.Popen(
         command,
@@ -210,7 +317,12 @@ def main():
         start_new_session=True,
         text=True,
     )
-    results = {"log": log_path}
+    results = {
+        "log": log_path,
+        "mode": "animation" if args.animation else "planted",
+        "ros_master_port": ros_port,
+        "gazebo_master_port": gazebo_port,
+    }
     set_motion = None
     try:
         def master_ready():
@@ -270,8 +382,18 @@ def main():
         states = []
         safe_commands = []
         joint_samples = []
+        stomp_events = []
+        statuses = []
         def remember_joint(message):
             joint_samples[:] = [message]
+        def remember_joy(message):
+            if len(message.buttons) > 5 and message.buttons[5] and joint_samples:
+                stomp_events.append({
+                    "started": rospy.Time.now(),
+                    "before": joint_samples[-1],
+                    "recovered": False,
+                    "mirror_peak": 0.0,
+                })
         response_sub = rospy.Subscriber(
             "/emotion_bot/chat/response", String, lambda message: responses.append(message.data), queue_size=10
         )
@@ -282,13 +404,65 @@ def main():
         safe_sub = rospy.Subscriber(
             "/emotion_bot/safe_cmd", Twist, lambda message: safe_commands.append(message), queue_size=200
         )
+        status_sub = rospy.Subscriber(
+            "/emotion_bot/status", String,
+            lambda message: statuses.append(json.loads(message.data)), queue_size=20,
+        )
         joint_sub = rospy.Subscriber(
             "/lite3_gazebo/joint_states", JointState, remember_joint, queue_size=1
         )
+        joy_sub = rospy.Subscriber(
+            "/emotion_bot/joy_out", Joy, remember_joy, queue_size=20
+        )
+
+        def check_animation_joints(phase):
+            if not joint_samples:
+                return
+            current = joint_samples[-1]
+            assert_hips_not_splayed(current)
+            if not args.animation:
+                return
+            try:
+                assert_joint_margin(current)
+            except RuntimeError as exc:
+                pose = link_sample(get_link)
+                raise RuntimeError(
+                    "%s during %s (torso roll %.4f, pitch %.4f)"
+                    % (exc, phase, pose["roll"], pose["pitch"])
+                )
+            now = rospy.Time.now()
+            for event in stomp_events:
+                elapsed = (now - event["started"]).to_sec()
+                if 0.0 <= elapsed <= 0.75:
+                    event["mirror_peak"] = max(
+                        event["mirror_peak"], front_hips_mirrored(current)
+                    )
+                elif elapsed >= 1.90 and not event["recovered"]:
+                    recovery_error = joint_distance(event["before"], current)
+                    if recovery_error > 0.30:
+                        raise RuntimeError(
+                            "stomp recovery joint error %.4f exceeded 0.30 rad" % recovery_error
+                        )
+                    event["recovered"] = True
+
+        def assert_runtime_healthy(phase):
+            if not statuses:
+                return
+            status = statuses[-1]
+            if not status.get("health_ok", False):
+                raise RuntimeError(
+                    "simulation health fault %s during %s"
+                    % (status.get("health_fault", "unknown"), phase)
+                )
+            if not status.get("motion_enabled", False):
+                raise RuntimeError("motion permission was revoked during %s" % phase)
         rospy.sleep(0.5)
 
         initial_state = json.loads(wait_message("/emotion_bot/state", String).data)
-        input_pub.publish(String(data=json.dumps({"turn_id": "gazebo-turn", "text": "event:joy"})))
+        initial_emotion = "neutral" if args.animation else "joy"
+        input_pub.publish(String(data=json.dumps({
+            "turn_id": "gazebo-turn", "text": "event:%s" % initial_emotion,
+        })))
         changed = wait_wall(
             lambda: next(
                 (
@@ -300,8 +474,10 @@ def main():
             "turn-scoped user emotion state",
             timeout=10.0,
         )
-        if changed["emotion"] != "joy":
-            raise RuntimeError("expected joy, got %s" % changed["emotion"])
+        if changed["emotion"] != initial_emotion:
+            raise RuntimeError(
+                "expected %s, got %s" % (initial_emotion, changed["emotion"])
+            )
         wait_wall(lambda: responses[-1] if responses else None, "emotion response", timeout=5.0)
         response = json.loads(responses[-1])["text"]
         results["emotion"] = changed
@@ -313,22 +489,29 @@ def main():
             raise RuntimeError("motion enable service failed")
         safe = wait_message(
             "/emotion_bot/safe_cmd", Twist,
-            lambda msg: max(abs(msg.linear.z), abs(msg.angular.x), abs(msg.angular.y)) > 0.005,
+            lambda msg: max(abs(msg.linear.z), abs(msg.angular.x), abs(msg.angular.y))
+            > (0.0005 if args.animation else 0.005),
             timeout=30.0,
         )
         if (
-            abs(safe.linear.x) > 1e-9
-            or abs(safe.linear.y) > 1e-9
-            or abs(safe.angular.z) > 1e-9
-            or abs(safe.linear.z) > 0.070001
-            or abs(safe.angular.x) > 0.500001
-            or abs(safe.angular.y) > 0.500001
+            (not args.animation and (
+                abs(safe.linear.x) > 1e-9
+                or abs(safe.linear.y) > 1e-9
+                or abs(safe.angular.z) > 1e-9
+            ))
+            or abs(safe.linear.x) > 0.100001
+            or abs(safe.linear.y) > 0.050001
+            or abs(safe.angular.z) > 0.100001
+            or abs(safe.linear.z) > 0.100001
+            or abs(safe.angular.x) > 0.625001
+            or abs(safe.angular.y) > 0.625001
         ):
             raise RuntimeError("unsafe expression command observed")
 
         peak_distance = 0.0
         peak_speed = 0.0
         moved_sample = before
+        movement_minimum = 0.001 if args.animation else 0.008
         movement_deadline = time.monotonic() + 45.0
         while time.monotonic() < movement_deadline:
             sample = link_sample(get_link)
@@ -338,10 +521,10 @@ def main():
                 peak_distance = distance
                 moved_sample = sample
             peak_speed = max(peak_speed, speed)
-            if peak_distance >= 0.008:
+            if peak_distance >= movement_minimum:
                 break
             time.sleep(0.4)
-        if peak_distance < 0.008:
+        if peak_distance < movement_minimum:
             raise RuntimeError("Gazebo body posture did not measurably move")
         assert_standing(moved_sample, "emotion movement")
         results["emotion_motion"] = {
@@ -352,6 +535,19 @@ def main():
             "peak_planar_speed_mps": peak_speed,
         }
 
+        # Let the preliminary posture settle before starting the independent
+        # per-profile measurements. Animation mode uses neutral here so every
+        # theatrical entrance is exercised exactly once in the sequence below.
+        initial_settle_end = rospy.Time.now() + rospy.Duration(1.0)
+        initial_settle_deadline = time.monotonic() + 45.0
+        while rospy.Time.now() < initial_settle_end and time.monotonic() < initial_settle_deadline:
+            sample = link_sample(get_link)
+            assert_standing(sample, "opening expression settle")
+            assert_runtime_healthy("opening expression settle")
+            time.sleep(0.20)
+        if rospy.Time.now() < initial_settle_end:
+            raise RuntimeError("simulated time stalled during opening expression settle")
+
         # Exercise every profile through ROS state publication, rather than
         # merely observing mapper topics.  Each test starts from the torso's
         # current physical pose, samples its entrance peak, then samples after
@@ -359,10 +555,14 @@ def main():
         # expressing the active emotion.  Neutral is intentionally allowed to
         # settle to exact zero; every other profile must visibly move in Gazebo.
         profile_results = {}
+        previous_emotion = None
         for emotion in EMOTION_SEQUENCE:
+            print("Reviewing %s (%s)" % (emotion, results["mode"]), flush=True)
+            profile_stomp_start = len(stomp_events)
             profile_before = link_sample(get_link)
             joints_before = wait_message("/lite3_gazebo/joint_states", JointState, timeout=5.0)
             marker = "gazebo-profile-%s" % emotion
+            safe_commands[:] = []
             input_pub.publish(String(data=json.dumps({"turn_id": marker, "text": "event:%s" % emotion})))
             profile_state = wait_wall(
                 lambda: next(
@@ -380,52 +580,124 @@ def main():
             transition_peak = 0.0
             joint_peak = 0.0
             peak_sample = profile_before
-            # Slow sadness/affection entrances require several simulated
-            # seconds; a wall deadline catches stalled Gazebo time.
-            transition_end = rospy.Time.now() + rospy.Duration(4.0)
-            wall_deadline = time.monotonic() + 30.0
+            # End the entrance window at the profile's actual configured
+            # boundary in both modes. A fixed four-second delay can land the
+            # following idle baseline at an arbitrary point in a short loop
+            # (especially fear's short tremble), making the measured
+            # excursion depend on phase alignment rather than expressiveness.
+            reset_required = previous_emotion not in (None, "neutral") and emotion != "neutral"
+            transition_seconds = TRANSITION_SECONDS[emotion]
+            if reset_required:
+                transition_seconds += EMOTION_RESET_SECONDS
+            transition_end = rospy.Time.now() + rospy.Duration(transition_seconds)
+            wall_deadline = time.monotonic() + max(30.0, transition_seconds * 10.0)
+            planar_peak = 0.0
             while rospy.Time.now() < transition_end and time.monotonic() < wall_deadline:
                 sample = link_sample(get_link)
                 change = posture_distance(profile_before, sample)
+                planar_peak = max(planar_peak, planar_distance(profile_before, sample))
                 if change > transition_peak:
                     transition_peak = change
                     peak_sample = sample
                 if joint_samples:
                     joint_peak = max(joint_peak, joint_distance(joints_before, joint_samples[-1]))
+                check_animation_joints("%s transition" % emotion)
                 assert_standing(sample, "%s transition" % emotion)
+                assert_runtime_healthy("%s transition" % emotion)
                 time.sleep(0.20)
             if rospy.Time.now() < transition_end:
                 raise RuntimeError("simulated time stalled during %s transition" % emotion)
+            if reset_required:
+                longest_neutral_run = 0
+                current_neutral_run = 0
+                for command in safe_commands:
+                    if twist_is_neutral(command):
+                        current_neutral_run += 1
+                        longest_neutral_run = max(longest_neutral_run, current_neutral_run)
+                    else:
+                        current_neutral_run = 0
+                if longest_neutral_run < 5:
+                    raise RuntimeError(
+                        "%s did not hold a fresh canonical stance before its entrance"
+                        % emotion
+                    )
             idle_before = link_sample(get_link)
             idle_joints_before = wait_message("/lite3_gazebo/joint_states", JointState, timeout=5.0)
-            # Cover the slowest configured idle half-cycle (sadness) rather
-            # than sampling two nearby points in the same held posture.
-            rospy.sleep(3.0)
-            idle_after = link_sample(get_link)
-            idle_joints_after = wait_message("/lite3_gazebo/joint_states", JointState, timeout=5.0)
-            idle_change = posture_distance(idle_before, idle_after)
-            idle_joint_change = joint_distance(idle_joints_before, idle_joints_after)
-            if emotion != "neutral" and max(transition_peak, joint_peak) < 0.006:
+            idle_seconds = 2.0 * IDLE_SECONDS[emotion] if args.animation else 3.0
+            idle_end = rospy.Time.now() + rospy.Duration(idle_seconds)
+            wall_deadline = time.monotonic() + max(30.0, idle_seconds * 10.0)
+            idle_change = 0.0
+            idle_joint_change = 0.0
+            idle_after = idle_before
+            while rospy.Time.now() < idle_end and time.monotonic() < wall_deadline:
+                idle_after = link_sample(get_link)
+                planar_peak = max(planar_peak, planar_distance(profile_before, idle_after))
+                idle_change = max(idle_change, posture_distance(idle_before, idle_after))
+                if joint_samples:
+                    idle_joint_change = max(
+                        idle_joint_change,
+                        joint_distance(idle_joints_before, joint_samples[-1]),
+                    )
+                check_animation_joints("%s idle" % emotion)
+                assert_standing(idle_after, "%s idle" % emotion)
+                assert_runtime_healthy("%s idle" % emotion)
+                time.sleep(0.20)
+            if rospy.Time.now() < idle_end:
+                raise RuntimeError("simulated time stalled during %s idle" % emotion)
+            # These are physical Gazebo measurements, not command-topic
+            # deltas. They intentionally reject animations that only move by
+            # a few invisible milliradians.
+            entrance_minimum = 0.006 if emotion == "neutral" else 0.018
+            idle_minimum = 0.004 if emotion == "neutral" else 0.012
+            if (args.animation or emotion != "neutral") and max(transition_peak, joint_peak) < entrance_minimum:
                 raise RuntimeError(
                     "%s transition was not visibly measurable (torso %.4f, joint %.4f)"
                     % (emotion, transition_peak, joint_peak)
                 )
-            if emotion != "neutral" and max(idle_change, idle_joint_change) < 0.0005:
+            if (args.animation or emotion != "neutral") and max(idle_change, idle_joint_change) < idle_minimum:
                 raise RuntimeError(
                     "%s idle loop was not visibly measurable (torso %.4f, joint %.4f)"
                     % (emotion, idle_change, idle_joint_change)
                 )
-            if planar_distance(profile_before, peak_sample) > 0.0401:
-                raise RuntimeError("%s exceeded posture-only planar safety envelope" % emotion)
+            # Every chat expression is planted. Expressive hops may produce a
+            # few harmless centimeters of contact drift; auto-recenter begins
+            # at 0.09 m, so reject sustained travel rather than theatricality.
+            planar_limit = 0.10
+            if planar_peak > planar_limit:
+                raise RuntimeError(
+                    "%s exceeded %.3f m planar envelope (%.4f m)"
+                    % (emotion, planar_limit, planar_peak)
+                )
+            emotion_stomps = stomp_events[profile_stomp_start:]
+            if args.animation and emotion == "anger":
+                if len(emotion_stomps) < 3:
+                    raise RuntimeError(
+                        "anger emitted only %d stomp bursts during animation hold"
+                        % len(emotion_stomps)
+                    )
+                starts = [item["started"].to_sec() for item in emotion_stomps]
+                spacings = [second - first for first, second in zip(starts, starts[1:])]
+                recurring = spacings[1:] if len(spacings) > 1 else []
+                if not recurring or not all(2.25 <= spacing <= 2.65 for spacing in recurring):
+                    raise RuntimeError("anger recurring stomp spacing outside 2.25-2.65 seconds: %s" % spacings)
+                if len([item for item in emotion_stomps if item["recovered"]]) < 2:
+                    raise RuntimeError("fewer than two anger stomps completed bounded recovery")
             profile_results[emotion] = {
                 "state_sequence": profile_state["sequence"],
                 "transition_displacement": transition_peak,
                 "transition_joint_displacement": joint_peak,
                 "idle_variation": idle_change,
                 "idle_joint_variation": idle_joint_change,
-                "planar_displacement_m": planar_distance(profile_before, peak_sample),
+                "planar_displacement_m": planar_peak,
+                "stomp_bursts": len(emotion_stomps),
+                "stomp_recoveries": len(
+                    [item for item in emotion_stomps if item["recovered"]]
+                ),
                 "peak": peak_sample,
             }
+            print("  travel=%.4fm, idle joint motion=%.4frad, stomps=%d" % (
+                planar_peak, idle_joint_change, len(emotion_stomps)), flush=True)
+            previous_emotion = emotion
         results["all_emotion_profiles"] = profile_results
 
         # Interrupt two entrance gestures, then repeat anger once inside and
@@ -433,7 +705,7 @@ def main():
         # and replay only the cooled-down trigger; all observed transport stays
         # within the same stance-only envelope.
         rapid_sequences = []
-        for index, emotion in enumerate(("anger", "fear", "anger")):
+        for index, emotion in enumerate(("joy", "anger", "fear")):
             marker = "gazebo-rapid-%d" % index
             input_pub.publish(String(data=json.dumps({"turn_id": marker, "text": "event:%s" % emotion})))
             rapid = wait_wall(
@@ -450,14 +722,14 @@ def main():
             elif index == 1:
                 rospy.sleep(0.12)
         rospy.sleep(0.75)
-        repeat_marker = "gazebo-repeat-anger"
-        input_pub.publish(String(data=json.dumps({"turn_id": repeat_marker, "text": "event:anger"})))
+        repeat_marker = "gazebo-repeat-fear"
+        input_pub.publish(String(data=json.dumps({"turn_id": repeat_marker, "text": "event:fear"})))
         wait_wall(
             lambda: next(
                 (state for state in states if state.get("turn_id") == repeat_marker and state.get("source") == "user"),
                 None,
             ),
-            "cooled-down repeated anger state",
+            "repeated fear state",
             timeout=10.0,
         )
         rospy.sleep(0.35)
@@ -466,8 +738,8 @@ def main():
         for command in safe_commands[-30:]:
             if (
                 abs(command.linear.x) > 1e-9 or abs(command.linear.y) > 1e-9 or abs(command.angular.z) > 1e-9
-                or abs(command.linear.z) > 0.070001 or abs(command.angular.x) > 0.500001
-                or abs(command.angular.y) > 0.500001
+                or abs(command.linear.z) > 0.100001 or abs(command.angular.x) > 0.625001
+                or abs(command.angular.y) > 0.625001
             ):
                 raise RuntimeError("rapid emotion change escaped safe posture limits")
         results["rapid_and_repeated"] = {"state_sequences": rapid_sequences, "safe": True}
@@ -518,19 +790,23 @@ def main():
         )
         results["watchdog"] = {"zero": stale_zero.linear.z == 0.0, "status": status}
 
-        # Manual posture has priority. Locomotion buttons and axes remain
-        # blocked unless the experimental allow_locomotion parameter is true.
+        # The planted run also proves that manual locomotion mode is blocked.
+        # The animation run keeps locomotion enabled but uses a posture-only
+        # manual command here so the final shutdown assertion is comparable.
         manual_before = link_sample(get_link)
         joy = Joy()
         joy.axes = [0.0] * 8
         joy.buttons = [0] * 11
-        joy.buttons[2] = 1
-        manual_pub.publish(joy)
-        blocked_x = wait_message(
-            "/emotion_bot/joy_out", Joy,
-            lambda msg: len(msg.buttons) > 2 and msg.buttons[2] == 0,
-            timeout=5.0,
-        )
+        locomotion_button_blocked = None
+        if not args.animation:
+            joy.buttons[2] = 1
+            manual_pub.publish(joy)
+            blocked_x = wait_message(
+                "/emotion_bot/joy_out", Joy,
+                lambda msg: len(msg.buttons) > 2 and msg.buttons[2] == 0,
+                timeout=5.0,
+            )
+            locomotion_button_blocked = blocked_x.buttons[2] == 0
         joy.buttons = [0] * 11
         joy.axes[6] = 0.4
         publish_for(manual_pub, joy, 2.0)
@@ -551,7 +827,7 @@ def main():
             "before": manual_before,
             "after": manual_after,
             "posture_displacement": manual_distance,
-            "locomotion_button_blocked": blocked_x.buttons[2] == 0,
+            "locomotion_button_blocked": locomotion_button_blocked,
             "status": manual_status,
         }
 

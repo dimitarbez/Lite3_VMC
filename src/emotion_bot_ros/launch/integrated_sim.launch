@@ -4,7 +4,7 @@
   <arg name="world" default="earth"/>
   <!-- Simulation-only auto-enable; safety_bridge waits for health and stance. -->
   <arg name="motion_enabled" default="true"/>
-  <arg name="allow_locomotion" default="false"/>
+  <arg name="allow_locomotion" default="true"/>
   <arg name="emotion_bot_path" default="/workspaces/emotion-bot"/>
   <arg name="chat_backend" default="deterministic"/>
   <arg name="chat_model" default="gpt-5-mini"/>
@@ -39,12 +39,6 @@
   <param name="/emotion_bot/safety/require_sim_ready" value="true"/>
   <param name="/emotion_bot/safety/monitor_sim_health" value="true"/>
   <param name="/emotion_bot/safety/prepare_stance_on_ready" value="true"/>
-  <!-- Gazebo-only calibrated impulse; never present in the reusable core launch. -->
-  <param name="/emotion_bot/safety/gazebo_stomp_impulse_enabled" value="true"/>
-  <param name="/emotion_bot/safety/gazebo_stomp_force" value="160.0"/>
-  <param name="/emotion_bot/safety/gazebo_stomp_duration" value="0.08"/>
-  <param name="/emotion_bot/safety/gazebo_stomp_delay" value="0.12"/>
-
   <node pkg="emotion_bot_ros" type="sim_ready_runner.py" name="lite3_sim_runner"
         output="screen" required="true">
     <param name="startup_timeout" value="120.0"/>

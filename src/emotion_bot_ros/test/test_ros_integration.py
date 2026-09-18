@@ -73,6 +73,7 @@ class CoreIntegrationTest(unittest.TestCase):
         input_pub = rospy.Publisher("/emotion_bot/input", String, queue_size=10)
         manual_pub = rospy.Publisher("/emotion_bot/manual_joy", Joy, queue_size=10)
         direct_pub = rospy.Publisher("/emotion_bot/expression_cmd", Twist, queue_size=10)
+        action_pub = rospy.Publisher("/emotion_bot/expression_action", String, queue_size=10)
         responses = []
         response_sub = rospy.Subscriber(
             "/emotion_bot/response", String, lambda message: responses.append(message.data), queue_size=10
@@ -119,12 +120,53 @@ class CoreIntegrationTest(unittest.TestCase):
             "/emotion_bot/safe_cmd", Twist,
             lambda msg: abs(msg.linear.z) > 0.0,
         )
-        self.assertEqual(bounded.linear.x, 0.0)
-        self.assertEqual(bounded.linear.y, 0.0)
-        self.assertEqual(bounded.angular.z, 0.0)
-        self.assertLessEqual(abs(bounded.linear.z), 0.070)
-        self.assertLessEqual(abs(bounded.angular.x), 0.50)
-        self.assertLessEqual(abs(bounded.angular.y), 0.50)
+        # Locomotion is enabled by default, so the concurrent joy profile may
+        # legitimately contribute travel while the injected posture is tested.
+        self.assertLessEqual(abs(bounded.linear.x), 0.10)
+        self.assertLessEqual(abs(bounded.linear.y), 0.05)
+        self.assertLessEqual(abs(bounded.angular.z), 0.10)
+        self.assertLessEqual(abs(bounded.linear.z), 0.035)
+        self.assertLessEqual(abs(bounded.angular.x), 0.20)
+        self.assertLessEqual(abs(bounded.angular.y), 0.20)
+
+        # Structured action commands preserve generation ordering. A cancel is
+        # delivered before the same-generation start, and the bridge waits for
+        # its controlled stance transition before pulsing the stomp button.
+        generation = 10000
+        action_pub.publish(String(data=json.dumps({
+            "schema_version": "1.0",
+            "kind": "cancel",
+            "generation": generation,
+        })))
+        action_pub.publish(String(data=json.dumps({
+            "schema_version": "1.0",
+            "kind": "start",
+            "action": "stomp",
+            "emotion": "anger",
+            "generation": generation,
+            "occurrence_id": "ros-test:0",
+        })))
+        cancelled = self.wait_for(
+            "/emotion_bot/joy_out", Joy,
+            lambda msg: len(msg.buttons) > 6 and msg.buttons[6] == 1,
+            timeout=4.0,
+        )
+        self.assertEqual(cancelled.buttons[5], 0)
+        stomp = self.wait_for(
+            "/emotion_bot/joy_out", Joy,
+            lambda msg: len(msg.buttons) > 5 and msg.buttons[5] == 1,
+            timeout=5.0,
+        )
+        self.assertEqual(stomp.buttons[6], 0)
+
+        # Legacy plain strings remain accepted for compatibility.
+        action_pub.publish(String(data="hop"))
+        hop = self.wait_for(
+            "/emotion_bot/joy_out", Joy,
+            lambda msg: len(msg.buttons) > 4 and msg.buttons[4] == 1,
+            timeout=3.0,
+        )
+        self.assertEqual(hop.buttons[5], 0)
 
         manual = Joy()
         manual.axes = [0.0] * 8

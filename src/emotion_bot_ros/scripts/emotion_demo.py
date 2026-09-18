@@ -4,6 +4,7 @@
 import argparse
 import json
 import threading
+import time
 
 import rospy
 from std_msgs.msg import String
@@ -46,6 +47,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--enable-motion", action="store_true")
     parser.add_argument("--hold", type=float, default=2.0, help="wall seconds between events")
+    parser.add_argument(
+        "--animation-review",
+        action="store_true",
+        help="show every entrance and at least two complete idle cycles",
+    )
     args, _unknown = parser.parse_known_args()
     rospy.init_node("emotion_demo", anonymous=True)
     demo = Demo()
@@ -55,15 +61,45 @@ def main():
     try:
         if args.enable_motion:
             print(set_motion(True).message)
-        for event in ("event:joy", "event:anger", "event:curiosity"):
+        if args.animation_review:
+            sequence = (
+                ("neutral", 8.5),
+                ("joy", 8.0),
+                ("sadness", 11.6),
+                ("anger", 29.5),
+                ("fear", 2.6),
+                ("surprise", 7.8),
+                ("disgust", 9.0),
+                ("curiosity", 7.8),
+                ("affection", 11.1),
+            )
+        else:
+            sequence = (("joy", args.hold), ("anger", args.hold), ("curiosity", args.hold))
+        for emotion, hold in sequence:
+            event = "event:%s" % emotion
             state, response = demo.send(event)
             print(
-                "%s -> emotion=%s valence=%+.3f arousal=%.3f\n  response=%s"
-                % (event, state["emotion"], state["valence"], state["arousal"], response)
+                "%s -> emotion=%s valence=%+.3f arousal=%.3f hold=%.1fs\n  response=%s"
+                % (
+                    event,
+                    state["emotion"],
+                    state["valence"],
+                    state["arousal"],
+                    hold,
+                    response,
+                )
             )
-            rospy.sleep(args.hold)
-        state, response = demo.send("event:neutral")
-        print("event:neutral -> emotion=%s response=%s" % (state["emotion"], response))
+            # Animation phases use ROS time: slow rendering must not truncate
+            # the promised idle cycles. Keep the original demo's wall holds.
+            if args.animation_review:
+                rospy.sleep(hold)
+            else:
+                deadline = time.monotonic() + hold
+                while not rospy.is_shutdown() and time.monotonic() < deadline:
+                    time.sleep(max(0.0, min(0.1, deadline - time.monotonic())))
+        if not args.animation_review:
+            state, response = demo.send("event:neutral")
+            print("event:neutral -> emotion=%s response=%s" % (state["emotion"], response))
     finally:
         print(set_motion(False).message)
         rospy.sleep(0.5)
