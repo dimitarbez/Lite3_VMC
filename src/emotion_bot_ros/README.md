@@ -1,6 +1,6 @@
 # emotion_bot_ros
 
-`emotion_bot_ros` is the simulation-only boundary between the sibling EmotionBot domain model, conversational backends, and the DEEP Robotics Lite3 Gazebo controller. Conversation, emotional reasoning, expression mapping, and actuation safety remain separate. Neither the chat node nor EmotionBot publishes Joy, joint effort, motor data, or UDP.
+`emotion_bot_ros` is the development-computer boundary between the sibling EmotionBot domain model, conversational backends, and Lite3 integration. Its normal graph targets Gazebo. Its separate `hardware_brain.launch` contains only chat, emotional reasoning, and a loopback uplink—never mapping or actuation. Neither the chat node nor EmotionBot publishes Joy, joint effort, motor data, or robot UDP.
 
 ## Runtime and source boundary
 
@@ -16,6 +16,7 @@ ROS Noetic remains on Python 3.8. The default verified backend is deterministic 
 | `/emotion_bot/adapter` | Feed accepted user/current assistant events into one `EmotionEngine`; validate and latch contract 1.1 state with turn correlation. |
 | `/emotion_bot/expression_mapper` | Filter affect, gate category changes, blend/rate-limit the mapped expression, and return smoothly to neutral. |
 | `/emotion_bot/safety_bridge` | Clamp emotion/manual intentions, enforce enable/readiness/watchdogs, arbitrate manual priority, publish status, and generate the simulator Joy input. |
+| `/emotion_bot/hardware_uplink` | Revalidate state 1.1 and send 5 Hz transport-schema 1.0 NDJSON to an SSH-forwarded loopback port. |
 | `/lite3_controller_loader` | Load/start 12 effort controllers plus joint-state controller without stdin. |
 | `/lite3_sim_runner` | Wait for readiness, supervise `example_lite3_sim`, remap its sole Joy input, and stop it on shutdown. |
 | `emotion_chat.py` | Interactive streaming client with turn-correlated response/state display. |
@@ -76,6 +77,10 @@ Validation requires a non-negative sequence, ROS timestamp, non-empty backend/so
 The sidecar binds `127.0.0.1:8765`. `/v1/stream` accepts only bounded JSON and emits NDJSON deltas/done. It calls `client.responses.create` using `gpt-5-mini`, `stream=true`, `store=false`, minimal reasoning, low verbosity, a 20-second timeout, and SDK retries disabled. The ROS coordinator retries once, then uses the deterministic backend. Cancellation closes the upstream stream when possible; a timeout bounds an unresponsive request. Errors crossing either boundary are generic.
 
 For persistent local use, put the credential in the workspace root `.env` as `OPENAI_API_KEY=...`; the file is Git-ignored and should remain mode `600`. The wrapper sources it automatically for `start-openai-bridge`. Docker passes only the variable name with `--env OPENAI_API_KEY` (no value in arguments) and starts the sidecar with `--rm`; `/health` exposes only booleans for key presence/test mode.
+
+## Hardware brain transport
+
+`hardware_brain.launch` starts only the chat adapter, emotion adapter, and hardware uplink. The uplink connects only to `127.0.0.1:8767`, which is expected to be an explicit SSH local-forward. Each launch uses a random session ID and strictly increasing transport sequence. Every newline-delimited frame is at most 2 KiB and carries the unchanged validated emotion-state 1.1 payload. It does not load the simulator mapper or safety bridge and cannot address the robot motion host.
 
 ## Expression action contract 1.0
 

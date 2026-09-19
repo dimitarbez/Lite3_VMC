@@ -20,6 +20,7 @@ catkin_install_python(PROGRAMS
   scripts/emotion_chat.py
   scripts/emotion_demo.py
   scripts/expression_mapper.py
+  scripts/hardware_uplink.py
   scripts/load_sim_controllers.py
   scripts/safety_bridge.py
   scripts/sim_ready_runner.py

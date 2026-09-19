@@ -9,6 +9,14 @@ import unittest
 import yaml
 
 from emotion_bot_ros.contract import ContractError, EMOTIONS, build_state, dumps_state, loads_state
+from emotion_bot_ros.hardware_transport import (
+    MAX_FRAME_BYTES,
+    SequenceGate,
+    TransportError,
+    build_envelope,
+    decode_envelope,
+    encode_envelope,
+)
 from emotion_bot_ros.conversation import (
     ConversationCoordinator,
     ConversationError,
@@ -51,6 +59,25 @@ class ContractTests(unittest.TestCase):
         state["valence"] = 1.1
         with self.assertRaises(ContractError):
             loads_state(json.dumps(state))
+
+    def test_hardware_transport_round_trip_and_replay_rejection(self):
+        state = build_state(FakeTime(), 4, "joy", 0.8, 0.9, "deterministic", "user")
+        first = decode_envelope(encode_envelope(build_envelope("session-a", 1, state)))
+        second = decode_envelope(encode_envelope(build_envelope("session-a", 2, state)))
+        gate = SequenceGate()
+        self.assertTrue(gate.accept(first))
+        self.assertFalse(gate.accept(first))
+        self.assertTrue(gate.accept(second))
+        self.assertTrue(gate.accept(build_envelope("session-b", 1, state)))
+
+    def test_hardware_transport_rejects_oversize_and_extra_fields(self):
+        state = build_state(FakeTime(), 4, "joy", 0.8, 0.9, "deterministic", "user")
+        envelope = build_envelope("session-a", 1, state)
+        envelope["unexpected"] = True
+        with self.assertRaises(TransportError):
+            encode_envelope(envelope)
+        with self.assertRaises(TransportError):
+            decode_envelope(b"{" + b" " * MAX_FRAME_BYTES + b"}\n")
 
 
 class MappingAndSafetyTests(unittest.TestCase):
