@@ -23,6 +23,7 @@ from emotion_bot_ros.conversation import (
     ConversationError,
     DeterministicChatBackend,
     TurnGate,
+    chat_client_timeout,
     validate_conversation_event,
 )
 from emotion_bot_ros.mapping import (
@@ -684,6 +685,20 @@ class ConversationTests(unittest.TestCase):
         self.assertIsNone(tracker.matching("turn-000003", 7))
         tracker.reset()
         self.assertIsNone(tracker.matching("turn-000004", 7))
+
+    def test_chat_client_wait_covers_provider_retries_and_fallback(self):
+        self.assertEqual(
+            chat_client_timeout(
+                {"request_timeout": 20.0, "max_retries": 1, "retry_delay": 0.25}
+            ),
+            50.25,
+        )
+        self.assertEqual(
+            chat_client_timeout(
+                {"request_timeout": 5.0, "max_retries": 0, "retry_delay": 0.0}
+            ),
+            30.0,
+        )
 
     def test_retry_failure_and_offline_fallback_are_bounded(self):
         class FailingBackend:

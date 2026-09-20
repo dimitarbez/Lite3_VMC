@@ -8,7 +8,7 @@ import time
 import rospy
 from std_msgs.msg import String
 
-from emotion_bot_ros.conversation import AssistantStateTracker
+from emotion_bot_ros.conversation import AssistantStateTracker, chat_client_timeout
 
 
 class ChatClient:
@@ -20,6 +20,7 @@ class ChatClient:
         self.error = None
         self.turn_id = None
         self.assistant_states = AssistantStateTracker()
+        self.turn_timeout = chat_client_timeout(rospy.get_param("/emotion_bot/chat", {}))
         self.publisher = rospy.Publisher("/emotion_bot/chat/input", String, queue_size=10)
         self.state_sub = rospy.Subscriber("/emotion_bot/state", String, self.on_state, queue_size=10)
         self.events_sub = rospy.Subscriber("/emotion_bot/chat/events", String, self.on_event, queue_size=100)
@@ -59,7 +60,7 @@ class ChatClient:
             self.turn_id = None
             self.assistant_states.reset()
             self.publisher.publish(String(data=text))
-            deadline = time.monotonic() + 30.0
+            deadline = time.monotonic() + self.turn_timeout
             while not rospy.is_shutdown():
                 if self.error is not None:
                     raise RuntimeError(self.error)

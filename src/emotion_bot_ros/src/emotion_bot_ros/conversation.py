@@ -113,6 +113,16 @@ class AssistantStateTracker:
         return None
 
 
+def chat_client_timeout(config: Dict[str, Any]) -> float:
+    """Bound the client wait beyond every configured provider attempt."""
+
+    request_timeout = max(0.0, float(config.get("request_timeout", 20.0)))
+    retries = max(0, int(config.get("max_retries", 1)))
+    retry_delay = max(0.0, float(config.get("retry_delay", 0.25)))
+    provider_window = (retries + 1) * request_timeout + retries * retry_delay
+    return max(30.0, provider_window + 10.0)
+
+
 class DeterministicChatBackend:
     name = "deterministic"
 

@@ -74,7 +74,7 @@ Validation requires a non-negative sequence, ROS timestamp, non-empty backend/so
 
 ## Live OpenAI path
 
-The sidecar binds `127.0.0.1:8765`. `/v1/stream` accepts only bounded JSON and emits NDJSON deltas/done. It calls `client.responses.create` using `gpt-5-mini`, `stream=true`, `store=false`, minimal reasoning, low verbosity, a 20-second timeout, and SDK retries disabled. The ROS coordinator retries once, then uses the deterministic backend. Cancellation closes the upstream stream when possible; a timeout bounds an unresponsive request. Errors crossing either boundary are generic.
+The sidecar binds `127.0.0.1:8765`. `/v1/stream` accepts only bounded JSON and emits NDJSON deltas/done. It calls `client.responses.create` using `gpt-5-mini`, `stream=true`, `store=false`, minimal reasoning, low verbosity, a 20-second timeout, and SDK retries disabled. The ROS coordinator retries once, then uses the deterministic backend. The interactive client's bounded wait is derived from that full provider retry window plus fallback margin, so it cannot time out before the coordinator's configured outcome. Cancellation closes the upstream stream when possible; a timeout bounds an unresponsive request. Errors crossing either boundary are generic.
 
 For persistent local use, put the credential in the workspace root `.env` as `OPENAI_API_KEY=...`; the file is Git-ignored and should remain mode `600`. The wrapper sources it automatically for `start-openai-bridge`. Docker passes only the variable name with `--env OPENAI_API_KEY` (no value in arguments) and starts the sidecar with `--rm`; `/health` exposes only booleans for key presence/test mode.
 
