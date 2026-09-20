@@ -18,6 +18,7 @@ from emotion_bot_ros.hardware_transport import (
     encode_envelope,
 )
 from emotion_bot_ros.conversation import (
+    AssistantStateTracker,
     ConversationCoordinator,
     ConversationError,
     DeterministicChatBackend,
@@ -671,6 +672,18 @@ class ConversationTests(unittest.TestCase):
         final = [item for item in events if item["type"] == "completed"][0]
         self.assertTrue(final["text"])
         coordinator.shutdown()
+
+    def test_assistant_state_survives_heartbeat_overwrite(self):
+        tracker = AssistantStateTracker()
+        tracker.observe({"sequence": 8, "turn_id": "turn-000004", "source": "assistant"})
+        tracker.observe({"sequence": 8, "turn_id": "turn-000004", "source": "heartbeat"})
+        self.assertEqual(
+            tracker.matching("turn-000004", 7),
+            {"sequence": 8, "turn_id": "turn-000004", "source": "assistant"},
+        )
+        self.assertIsNone(tracker.matching("turn-000003", 7))
+        tracker.reset()
+        self.assertIsNone(tracker.matching("turn-000004", 7))
 
     def test_retry_failure_and_offline_fallback_are_bounded(self):
         class FailingBackend:

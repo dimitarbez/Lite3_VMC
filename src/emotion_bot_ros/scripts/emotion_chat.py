@@ -8,6 +8,8 @@ import time
 import rospy
 from std_msgs.msg import String
 
+from emotion_bot_ros.conversation import AssistantStateTracker
+
 
 class ChatClient:
     def __init__(self):
@@ -17,6 +19,7 @@ class ChatClient:
         self.response_backend = None
         self.error = None
         self.turn_id = None
+        self.assistant_states = AssistantStateTracker()
         self.publisher = rospy.Publisher("/emotion_bot/chat/input", String, queue_size=10)
         self.state_sub = rospy.Subscriber("/emotion_bot/state", String, self.on_state, queue_size=10)
         self.events_sub = rospy.Subscriber("/emotion_bot/chat/events", String, self.on_event, queue_size=100)
@@ -24,6 +27,7 @@ class ChatClient:
     def on_state(self, message):
         with self.condition:
             self.state = json.loads(message.data)
+            self.assistant_states.observe(self.state)
             self.condition.notify_all()
 
     def on_event(self, message):
@@ -53,19 +57,15 @@ class ChatClient:
             self.response_backend = None
             self.error = None
             self.turn_id = None
+            self.assistant_states.reset()
             self.publisher.publish(String(data=text))
             deadline = time.monotonic() + 30.0
             while not rospy.is_shutdown():
                 if self.error is not None:
                     raise RuntimeError(self.error)
-                matching_state = (
-                    self.state
-                    and self.state["sequence"] > previous
-                    and self.state.get("turn_id") == self.turn_id
-                    and self.state.get("source") == "assistant"
-                )
+                matching_state = self.assistant_states.matching(self.turn_id, previous)
                 if matching_state and self.response is not None:
-                    return self.response, self.state, self.response_backend
+                    return self.response, matching_state, self.response_backend
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError("timed out waiting for EmotionBot")

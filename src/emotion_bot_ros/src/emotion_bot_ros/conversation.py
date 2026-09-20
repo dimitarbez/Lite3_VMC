@@ -88,6 +88,31 @@ class TurnGate:
         return True
 
 
+class AssistantStateTracker:
+    """Retain the one-shot assistant appraisal across heartbeat updates."""
+
+    def __init__(self):
+        self._assistant_state: Optional[Dict[str, Any]] = None
+
+    def reset(self) -> None:
+        self._assistant_state = None
+
+    def observe(self, state: Dict[str, Any]) -> None:
+        if state.get("source") == "assistant":
+            self._assistant_state = state
+
+    def matching(self, turn_id: Optional[str], after_sequence: int) -> Optional[Dict[str, Any]]:
+        state = self._assistant_state
+        if (
+            state
+            and turn_id is not None
+            and state.get("turn_id") == turn_id
+            and state.get("sequence", -1) > after_sequence
+        ):
+            return state
+        return None
+
+
 class DeterministicChatBackend:
     name = "deterministic"
 
