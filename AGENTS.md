@@ -28,7 +28,8 @@ This is the active ROS Noetic/catkin checkout. The workspace-root hardware bound
 - Avoid loading transformers, plotting, microphones, or network clients during package import. The adapter imports the headless `EmotionEngine`; live OpenAI runs in a separate Python 3.12 sidecar.
 - Mock OpenAI/network behavior. Unit and integration tests must remain offline and deterministic.
 - Preserve upstream topic types, model/joint naming, coordinate semantics, and controller startup behavior unless a compatibility migration is explicitly requested.
-- Existing vendor real-robot SDK/executable code is not authorization to run or extend a hardware path. Do not run `example_lite3_real`, send UDP, or add a hardware launch without explicit current-task hardware direction.
+- `hardware_brain.launch` is reasoning/uplink orchestration only; it must not acquire MotionSDK or publish robot actuator commands. The physical runner, contact estimator, commissioning evidence, and per-emotion tickets live in the outer wrapper's `hardware-ws`, docs, and `tickets/` paths.
+- Existing vendor real-robot SDK/executable code is not authorization to run or extend a hardware path. Do not run `example_lite3_real`, send UDP, or add an actuator-owning hardware launch without explicit current-task hardware direction.
 
 ## Change routing
 
