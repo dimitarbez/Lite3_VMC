@@ -4,7 +4,7 @@
 
 ## Runtime and source boundary
 
-The package imports the read-only `/workspaces/emotion-bot` checkout at recorded commit `20c0c1361434bcf9ebaec4e8a5c9385e61c9c3e2`; it does not vendor or duplicate that GPL-3.0 code. The reusable API is `emotional_core.engine.EmotionEngine`, which owns state, personality, appraisal/update, memory, local response shaping, and seeded randomness without importing the interactive CLI, matplotlib, microphone, or startup key check.
+The package imports the read-only `/workspaces/emotion-bot` checkout pinned by the outer wrapper gitlink; it does not vendor or duplicate that GPL-3.0 code. The reusable API is `emotional_core.engine.EmotionEngine`, which owns state, personality, appraisal/update, memory, local response shaping, and seeded randomness without importing the interactive CLI, matplotlib, microphone, or startup key check.
 
 ROS Noetic remains on Python 3.8. The default verified backend is deterministic and headless. Live chat uses a separate `lite3-openai-runtime:local` Python 3.12 image pinned to the official `openai==3.6.0` SDK. The loopback bridge owns the Responses API call; the secret never enters ROS or the mounted workspace.
 
@@ -109,7 +109,7 @@ The controller-side 0.75-second stomp follows vertical offsets `-0.069`, `+0.100
 
 The integrated launch begins at zero, enters `JOY_STAND`, waits four simulated seconds for the stance transition, and then enables motion automatically. Every normal emotion profile has zero x/y/yaw, so joy cannot walk away while expressing itself. A simulation-only 40 Nm/rad HipX centering term keeps all four legs under the body instead of allowing contact forces to leave them crossed or splayed; physical-robot control is unchanged. The Gazebo model is not fixed: the bridge records its enable-time center, begins a four-foot recovery at 0.09 m, applies bounded 0.012 m incremental simulator corrections until it is within 0.035 m, then releases it; 0.20 m remains a hard safety boundary. Returning from an explicitly requested gait also guards the upstream transition before releasing a posture or queued action.
 
-Manual posture axes are bounded by the same limits and manual activity has priority for 0.75 seconds. `run-emotion-keyboard` selects posture mode: w/s pitch, a/d roll, and q/e height. Locomotion remains available only for explicit development/manual commands; chat emotions stay centered. Emotion/manual commands expire after 0.5 seconds and state expires after 1.0 second. Completion, stale state, disable, readiness loss, and upstream node failure converge to exact neutral posture and zero velocity. There is no real executable, UDP bridge, or hardware address in this package.
+Manual posture axes are bounded by the same limits and manual activity has priority for 0.75 seconds. `run-emotion-keyboard` selects posture mode: w/s pitch, a/d roll, and q/e height. Locomotion remains available only for explicit development/manual commands; chat emotions stay centered. Expression commands expire after 0.90 seconds, manual commands after 0.50 seconds, and state after 1.0 second. Stale expression returns its output to zero while motion permission can remain enabled. Completion, stale state, disable, readiness loss, and upstream node failure converge to exact neutral posture and zero velocity. There is no real executable, UDP bridge, or hardware address in this package.
 
 ## Parameters
 

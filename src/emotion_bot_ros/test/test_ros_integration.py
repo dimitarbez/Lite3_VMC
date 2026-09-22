@@ -125,9 +125,11 @@ class CoreIntegrationTest(unittest.TestCase):
         self.assertLessEqual(abs(bounded.linear.x), 0.10)
         self.assertLessEqual(abs(bounded.linear.y), 0.05)
         self.assertLessEqual(abs(bounded.angular.z), 0.10)
-        self.assertLessEqual(abs(bounded.linear.z), 0.035)
-        self.assertLessEqual(abs(bounded.angular.x), 0.20)
-        self.assertLessEqual(abs(bounded.angular.y), 0.20)
+        # Safety bridge limits from config/default.yaml; the mapper has its
+        # own slew limits and is not the envelope asserted here.
+        self.assertLessEqual(abs(bounded.linear.z), 0.100 + 1e-6)
+        self.assertLessEqual(abs(bounded.angular.x), 0.625 + 1e-6)
+        self.assertLessEqual(abs(bounded.angular.y), 0.625 + 1e-6)
 
         # Structured action commands preserve generation ordering. A cancel is
         # delivered before the same-generation start, and the bridge waits for
